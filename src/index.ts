@@ -12,6 +12,7 @@ import {
 	ensureSandbox,
 	exactSandbox,
 } from "./sandbox.js";
+import { formatChecks, runDoctor } from "./doctor.js";
 import {
 	ensureRemoteSession,
 	formatSessions,
@@ -187,8 +188,16 @@ async function localHandler(
 			ctx.ui.notify(`Destroyed ${name}`, "info");
 			return;
 		}
+		if (command === "doctor") {
+			let report = "";
+			await showOperation(ctx, "Checking sandbox prerequisites…", () => {
+				report = formatChecks(runDoctor(ctx.cwd));
+			});
+			ctx.ui.notify(report, "info");
+			return;
+		}
 		ctx.ui.notify(
-			"Usage: /sandbox [<id>|list|transfer|create|clean|destroy [--force]]",
+			"Usage: /sandbox [<id>|list|transfer|create|clean|destroy [--force]|doctor]",
 			"info",
 		);
 	} catch (error) {
@@ -393,7 +402,7 @@ export default function (atomic: ExtensionAPI) {
 		description: "Create or enter this branch's exe.dev sandbox",
 		handler: localHandler,
 		getArgumentCompletions: (prefix) =>
-			["list", "transfer", "create", "clean", "destroy", "destroy --force"]
+			["list", "transfer", "create", "clean", "destroy", "destroy --force", "doctor"]
 				.filter((value) => value.startsWith(prefix))
 				.map((value) => ({ value, label: value })),
 	});
