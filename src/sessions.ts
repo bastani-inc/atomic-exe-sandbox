@@ -257,7 +257,10 @@ export function formatSessions(sessions: SessionStatus[]): string {
 
 export const SESSIONCTL = `#!/usr/bin/env bash
 set -euo pipefail
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" TERM=xterm-256color COLORTERM=truecolor GH_HOST=github.int.exe.xyz
+# ATOMIC_CODING_AGENT_DIR pins Atomic to ~/.atomic/agent. Without it Atomic also scans
+# the legacy ~/.pi directory, where the exe.dev image keeps a Pi-only extension that
+# fails to load under Atomic and blocks session startup.
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" TERM=xterm-256color COLORTERM=truecolor GH_HOST=github.int.exe.xyz ATOMIC_CODING_AGENT_DIR="$HOME/.atomic/agent"
 root=$HOME/.atomic-exe
 registry=$root/sessions.json
 manifest=$root/manifest.json
@@ -404,9 +407,9 @@ start_window() {
     stale_tab=$tab
     live_workspace; workspace=$REPLY
     if [ -n "$workspace" ]; then
-      created=$(herdr_cli tab create --workspace "$workspace" --cwd "$checkout" --label "$id" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor)
+      created=$(herdr_cli tab create --workspace "$workspace" --cwd "$checkout" --label "$id" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
     else
-      created=$(herdr_cli workspace create --cwd "$checkout" --label "$session" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor)
+      created=$(herdr_cli workspace create --cwd "$checkout" --label "$session" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
     fi
     { IFS= read -r -d '' workspace; IFS= read -r -d '' tab; IFS= read -r -d '' pane; } < <(printf '%s' "$created" | herdr_ids)
     herdr_cli tab rename "$tab" "$id" >/dev/null
@@ -420,7 +423,7 @@ start_window() {
   fi
   # A restored pane keeps its cwd but loses the per-pane environment, so both paths set
   # the working directory and every variable explicitly.
-  command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor; exec script -qefc \\"$agent\\" '$log'"
+  command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=\\"\\$HOME/.atomic/agent\\"; exec script -qefc \\"$agent\\" '$log'"
   herdr_cli pane run "$pane" "$command" >/dev/null
   for _ in $(seq 1 60); do
     if marker_alive "$id"; then return 0; fi

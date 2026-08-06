@@ -4,8 +4,15 @@ import { vmScript, vmSsh } from "./exe.js";
 import type { GitContext, SandboxIdentity, SandboxManifest } from "./types.js";
 import { CHECKOUT_ROOT, HERDR_SESSION_NAME, MANIFEST_SCHEMA } from "./types.js";
 
-/** $HOME/.local/bin holds the herdr binary dropped by https://herdr.dev/install.sh. */
-const REMOTE_PATH = `export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"`;
+/**
+ * $HOME/.local/bin holds the herdr binary dropped by https://herdr.dev/install.sh.
+ *
+ * ATOMIC_CODING_AGENT_DIR is mandatory, not cosmetic. Atomic falls back to the legacy
+ * ~/.pi config directory when it is unset, and the exe.dev image ships a Pi-only
+ * exe-dev extension there that cannot load under Atomic. Setting it explicitly makes
+ * Atomic use ~/.atomic/agent alone and leaves exe.dev's Pi files untouched.
+ */
+const REMOTE_PATH = `export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" ATOMIC_CODING_AGENT_DIR="$HOME/.atomic/agent"`;
 
 /**
  * Herdr exposes no attached-client count, so an attached client is represented by a
@@ -133,24 +140,27 @@ rm -rf "$agent/git" "$agent/npm"
 python3 - "$mapping_b64" <<'PY'
 import base64,json,os,sys
 p=os.path.expanduser('~/.atomic/agent/settings.json'); m=json.loads(base64.b64decode(sys.argv[1]))
-if os.path.exists(p):
- d=json.load(open(p)); packages=[]
- for x in d.get('packages',[]):
-  x=m.get(x,x)
-  if isinstance(x,str) and x.startswith('git:git@github.com:'):
-   x='git:https://github.com/'+x[len('git:git@github.com:'):]
-  packages.append(x)
- d['packages']=packages
- powerline=d.get('powerline')
- if isinstance(powerline,str): powerline={'preset':powerline}
- if not isinstance(powerline,dict): powerline={'preset':'default'}
- items=powerline.get('customItems')
- if not isinstance(items,list): items=[]
- items=[item for item in items if not isinstance(item,dict) or item.get('id')!='exe-sandbox']
- items.insert(0,{'id':'exe-sandbox','statusKey':'atomic-exe-sandbox','position':'left','color':'accent','hideWhenMissing':True,'excludeFromExtensionStatuses':True})
- powerline['customItems']=items; d['powerline']=powerline
- with open(p,'w') as f: json.dump(d,f,indent=2); f.write(chr(10))
- os.chmod(p,0o600)
+d=json.load(open(p)) if os.path.exists(p) else {}
+packages=[]
+for x in d.get('packages',[]):
+ x=m.get(x,x)
+ if isinstance(x,str) and x.startswith('git:git@github.com:'):
+  x='git:https://github.com/'+x[len('git:git@github.com:'):]
+ packages.append(x)
+d['packages']=packages
+powerline=d.get('powerline')
+if isinstance(powerline,str): powerline={'preset':powerline}
+if not isinstance(powerline,dict): powerline={'preset':'default'}
+items=powerline.get('customItems')
+if not isinstance(items,list): items=[]
+items=[item for item in items if not isinstance(item,dict) or item.get('id')!='exe-sandbox']
+items.insert(0,{'id':'exe-sandbox','statusKey':'atomic-exe-sandbox','position':'left','color':'accent','hideWhenMissing':True,'excludeFromExtensionStatuses':True})
+powerline['customItems']=items; d['powerline']=powerline
+# A sandbox session starts headless, so Atomic must never stop at first-run
+# onboarding. Any truthy onboardedVersion short-circuits that flow.
+if not d.get('onboardedVersion'): d['onboardedVersion']=sys.argv[2] if len(sys.argv)>2 else '0.0.0'
+with open(p,'w') as f: json.dump(d,f,indent=2); f.write(chr(10))
+os.chmod(p,0o600)
 PY
 for pkg in "$root"/local-packages/*; do
  [ -d "$pkg" ] || continue

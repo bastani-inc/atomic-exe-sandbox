@@ -59,7 +59,7 @@ describe("herdr multiplexer control script",()=>{
  test("startup runs under the registry lock so concurrent ensures cannot duplicate a session",()=>{expect(SESSIONCTL).toContain(`    row=$(session_row "$id")\n    if ! session_alive "$row"; then\n      start_window "$row"\n      row=$(session_row "$id")\n    fi\n    flock -u 9`);expect(SESSIONCTL).toContain(`    start_window "$row"\n    row=$(session_row "$id")\n    flock -u 9`);expect(SESSIONCTL).not.toContain("\n  flock -x 9");expect(SESSIONCTL).not.toContain("\n  flock -u 9")})
  test("detach only signals a process that is still this session's herdr client",()=>{expect(SESSIONCTL).toContain("expected=['herdr','--session',session]");expect(SESSIONCTL).toContain("if len(parts)!=2 or parts[0]!=name or not parts[1].isdigit() or parts[1]!=start or argv!=expected:");expect(SESSIONCTL).toContain("os.kill(int(name),signal.SIGTERM)");expect(SESSIONCTL).toContain("no attached sandbox clients to detach");expect(SESSIONCTL).not.toContain("grep -qa herdr")})
  test("keeps startup output after herdr destroys the pane",()=>{expect(SESSIONCTL).toContain(`log="$root/atomic-start-$id.log"; install -m 600 /dev/null "$log"`);expect(SESSIONCTL).toContain(`exec script -qefc \\"$agent\\" '$log'`);expect(SESSIONCTL.match(/tail -n 200 "\$log" >&2/g)?.length).toBe(2);expect(SESSIONCTL).not.toContain(">&2 2>/dev/null")})
- test("reuses a restored pane instead of leaving a duplicate tab",()=>{expect(SESSIONCTL).toContain(`  if [ -n "$pane" ] && herdr_cli pane get "$pane" >/dev/null 2>&1; then`);expect(SESSIONCTL).toContain(`command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor;`);expect(SESSIONCTL).toContain(`    herdr_cli tab rename "$tab" "$id" >/dev/null\n    close_stale_tab "$stale_tab" "$tab"`);expect(SESSIONCTL).toContain("case \"$output\" in *tab_not_found*) return 0;; esac")})
+ test("reuses a restored pane instead of leaving a duplicate tab",()=>{expect(SESSIONCTL).toContain(`  if [ -n "$pane" ] && herdr_cli pane get "$pane" >/dev/null 2>&1; then`);expect(SESSIONCTL).toContain(`command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=`);expect(SESSIONCTL).toContain(`    herdr_cli tab rename "$tab" "$id" >/dev/null\n    close_stale_tab "$stale_tab" "$tab"`);expect(SESSIONCTL).toContain("case \"$output\" in *tab_not_found*) return 0;; esac")})
  test("keeps every state path off the replaced multiplexer",()=>{for(const legacy of LEGACY_COMMANDS)expect(SESSIONCTL).not.toContain(legacy);expect(SESSIONCTL).toContain("$HOME/.local/bin")})
 })
 describe("remote provisioning and lifecycle guards",()=>{
@@ -135,4 +135,23 @@ describe("SSH alias remotes",()=>{
  test("rejects an unresolvable alias",()=>expect(()=>parseRemote("nope:owner/repo",resolve)).toThrow("must be a GitHub repository"));
  test("still rejects a non-GitHub URL",()=>expect(()=>parseRemote("https://example.com/x/y.git",resolve)).toThrow("must be a GitHub repository"));
  test("literal github.com forms do not need resolution",()=>{let called=false;const spy=(h:string)=>{called=true;return resolve(h)};expect(parseRemote("git@github.com:a/b.git",spy).owner).toBe("a");expect(called).toBe(false)});
+})
+
+// REMOTE_SOURCE is the remote.ts source; the provisioning script is a literal inside it.
+describe("Atomic must not load the exe.dev image's Pi extension",()=>{
+ // The exeuntu image ships a Pi-only exe-dev extension in ~/.pi/agent/extensions.
+ // Atomic scans that legacy directory unless ATOMIC_CODING_AGENT_DIR is set, and the
+ // extension fails to load under Atomic, which blocked session startup on a real VM.
+ test("sessionctl pins the agent dir in its own environment",()=>expect(SESSIONCTL).toContain(`ATOMIC_CODING_AGENT_DIR="$HOME/.atomic/agent"`));
+ test("every herdr pane is created with the agent dir pinned",()=>{const created=SESSIONCTL.match(/herdr_cli (tab|workspace) create [^\n]*/g)??[];expect(created.length).toBe(2);for(const line of created)expect(line).toContain(`--env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent"`)});
+ test("the agent command re-exports it, because a restored pane loses its environment",()=>expect(SESSIONCTL).toContain("ATOMIC_CODING_AGENT_DIR=\\\"\\$HOME/.atomic/agent\\\";"));
+ test("provisioning pins it too",()=>expect(REMOTE_SOURCE).toContain(`ATOMIC_CODING_AGENT_DIR="$HOME/.atomic/agent"`));
+ test("provisioning never deletes exe.dev's Pi files",()=>{expect(REMOTE_SOURCE).not.toContain(`rm -rf "$HOME/.pi"`);expect(REMOTE_SOURCE).not.toContain("rm -rf $HOME/.pi")});
+})
+describe("headless first run",()=>{
+ // A sandbox session has no interactive user, so Atomic must never stop at the
+ // first-run theme picker. Any truthy onboardedVersion short-circuits that flow.
+ test("settings.json is written even when the VM has none",()=>expect(REMOTE_SOURCE).toContain("d=json.load(open(p)) if os.path.exists(p) else {}"));
+ test("onboarding is marked complete",()=>expect(REMOTE_SOURCE).toContain("if not d.get('onboardedVersion'): d['onboardedVersion']="));
+ test("an existing onboardedVersion is preserved",()=>expect(REMOTE_SOURCE).toContain("if not d.get('onboardedVersion')"));
 })
