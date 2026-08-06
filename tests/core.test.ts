@@ -278,3 +278,29 @@ describe("only allowlisted config leaves the machine",()=>{
  test("the user is shown the plan before approving the transfer",()=>{expect(SANDBOX_SOURCE).toContain("These paths will be streamed to");expect(SANDBOX_SOURCE).toContain("formatTransferPlan(plan)")});
  test("what actually went is reported afterwards",()=>expect(SANDBOX_SOURCE).toContain("formatTransferPlan(sent)"));
 })
+
+import { EXE_HOST_KEY_FINGERPRINT, formatChecks, knownHostFingerprints, sshFingerprint, type Check } from "../src/doctor.js";
+describe("doctor preflight",()=>{
+ // Every VM connection is validated against exe.dev's key through HostKeyAlias, so a
+ // wrong or missing known_hosts entry fails with an error that never mentions host keys.
+ const realKnownHosts="exe.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDEKtEcRW8OBtro5B/MG+EaisD+ZVwwHFa5";
+ test("computes an OpenSSH fingerprint without shelling out",()=>{
+  const key=Buffer.from("hello world").toString("base64");
+  expect(sshFingerprint(key)).toBe("SHA256:uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek");
+  expect(sshFingerprint(key)).not.toContain("=");
+ });
+ test("reads fingerprints out of known_hosts output",()=>{const got=knownHostFingerprints(`# comment\n${realKnownHosts}\n`);expect(got).toHaveLength(1);expect(got[0]).toMatch(/^SHA256:/)});
+ test("ignores comments and blank lines",()=>expect(knownHostFingerprints("# a\n\n# b\n")).toHaveLength(0));
+ test("pins the fingerprint exe.dev publishes",()=>expect(EXE_HOST_KEY_FINGERPRINT).toBe("SHA256:JJOP/lwiBGOMilfONPWZCXUrfK154cnJFXcqlsi6lPo"));
+
+ test("a failure carries a remediation",()=>{
+  const checks:Check[]=[{name:"exe.dev host key",ok:false,detail:"no known_hosts entry",fix:"run `ssh exe.dev` once"}];
+  const text=formatChecks(checks);
+  expect(text).toContain("✗ exe.dev host key");
+  expect(text).toContain("fix: run `ssh exe.dev` once");
+  expect(text).toContain("1 of 1 checks failed.");
+ });
+ test("a clean run says so",()=>expect(formatChecks([{name:"a",ok:true,detail:"fine"}])).toContain("All 1 checks passed."));
+ test("passing checks do not print a fix",()=>expect(formatChecks([{name:"a",ok:true,detail:"fine",fix:"unused"}])).not.toContain("fix:"));
+ test("the command is wired up and advertised",()=>{expect(INDEX_SOURCE).toContain('command === "doctor"');expect(INDEX_SOURCE).toContain("destroy [--force]|doctor")});
+})
