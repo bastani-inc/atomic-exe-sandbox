@@ -1,0 +1,13 @@
+{
+  "name": "atomic-exe-sandbox",
+  "version": "0.1.0",
+  "description": "Global Atomic extension for one persistent exe.dev sandbox per published Git branch.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["atomic-package", "atomic", "atomic-extension", "exe.dev", "sandbox", "worktree"],
+  "files": ["src", "README.md", "LICENSE"],
+  "atomic": { "extensions": ["src/index.ts"] },
+  "scripts": { "check": "tsc --noEmit", "test": "bun test" },
+  "peerDependencies": { "@bastani/atomic": "*" },
+  "devDependencies": { "@bastani/atomic": "^0.9.12", "@types/bun": "latest", "@types/node": "latest", "typescript": "^5.9.3" }
+}
