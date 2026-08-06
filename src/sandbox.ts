@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { ExtensionContext } from "@bastani/atomic";
 import { validatePortableConfig, transferPortableConfig } from "./config.js";
-import { createVm, deleteVm, discover, githubIntegration, listVms, readManifest, setComment, vmSshAllowFailure, VM_HOST_KEY_ARGS } from "./exe.js";
+import { createVm, deleteVm, discover, githubIntegration, listVms, readManifest, setComment, vmSshAllowFailure, waitForVmShell, VM_HOST_KEY_ARGS } from "./exe.js";
 import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
 import { identityForGit } from "./identity.js";
 import { startHerdrBridge } from "./herdr.js";
@@ -52,6 +52,9 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
  try{
   await progress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
   if(!reuse){const integration=githubIntegration(git.owner,git.repo);await progress(ctx,"Creating VM…");createVm(identity.vmName,identity.tags,integration)}
+  // exe.dev answers on its lobby REPL until the VM shell is routable, so every remote
+  // step below would fail with 'command not found' if it started immediately.
+  await progress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(identity.vmName);
   await progress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(identity.vmName,manifest);
   await progress(ctx,"Copying portable Atomic config and credentials…");await transferPortableConfig(identity.vmName,packages);
   await progress(ctx,"Installing Linux dependencies…");finalize(identity.vmName,manifest,packages);

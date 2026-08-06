@@ -17,6 +17,31 @@ export function vmScript(vm:string,script:string,args:string[]=[]):string {
   if(result.status!==0)throw new Error(`remote bootstrap failed (${result.status}): ${String(result.stderr||result.stdout).trim()}`);
   return String(result.stdout||"");
 }
+/**
+ * A new VM answers SSH before its shell is routable; until then exe.dev replies on the
+ * lobby REPL, which reports `command not found` for the bootstrap script.
+ *
+ * Measured against exe.dev: a fresh VM name becomes routable in seconds, but a name
+ * reused immediately after `rm` stayed on the lobby for more than five minutes and did
+ * not recover. VM names here are derived from the repository and branch, so destroying
+ * a sandbox and recreating it reuses the same name and hits exactly that state. Waiting
+ * longer does not help, so the wait is bounded and the error says what to do instead.
+ */
+export function waitForVmShell(vm:string,timeoutMs=180_000):void{
+ const deadline=Date.now()+timeoutMs;let last="not reachable";let sawLobby=false;
+ for(;;){
+  const probe=vmSshAllowFailure(vm,"printf","atomic-exe-ready");
+  const output=`${probe.stdout}${probe.stderr}`;
+  if(probe.exitCode===0&&probe.stdout.includes("atomic-exe-ready")&&!/exe\.dev repl/i.test(output))return;
+  if(/exe\.dev repl/i.test(output))sawLobby=true;
+  last=(probe.stderr||probe.stdout).trim()||last;
+  if(Date.now()>=deadline)throw new Error(
+   `VM ${vm} did not present a shell within ${Math.round(timeoutMs/1000)}s: ${last.slice(0,200)}`+
+   (sawLobby?`\nexe.dev kept answering on its lobby REPL, which happens when a VM name is reused soon after the previous VM of that name was deleted. The VM exists and is billable: delete it with 'exe.dev rm ${vm}', then either wait before recreating this branch's sandbox or work from a differently named branch.`:"")
+  );
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2_000);
+ }
+}
 export function listVms():ExeVm[]{const parsed=JSON.parse(exe("ls","--json")) as {vms:ExeVm[]};return parsed.vms??[]}
 export interface ExeIntegration { name:string; type:string; team?:boolean; attachments?:string[]; config?:{repositories?:string[]} }
 /** How the repository's GitHub integration must be bound to a new VM. */

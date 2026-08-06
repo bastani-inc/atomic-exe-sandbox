@@ -155,3 +155,20 @@ describe("headless first run",()=>{
  test("onboarding is marked complete",()=>expect(REMOTE_SOURCE).toContain("if not d.get('onboardedVersion'): d['onboardedVersion']="));
  test("an existing onboardedVersion is preserved",()=>expect(REMOTE_SOURCE).toContain("if not d.get('onboardedVersion')"));
 })
+
+const SANDBOX_SOURCE=readFileSync(new URL("../src/sandbox.ts",import.meta.url),"utf8");
+const EXE_SOURCE=readFileSync(new URL("../src/exe.ts",import.meta.url),"utf8");
+describe("a new VM is not usable the moment exe.dev returns",()=>{
+ // Observed on a real create: exe.dev answered on its lobby REPL and the bootstrap
+ // script came back as `exe.dev repl: command not found`, failing creation at random.
+ test("creation waits for a real VM shell before the first remote step",()=>{
+  const wait=SANDBOX_SOURCE.indexOf("waitForVmShell(identity.vmName)");
+  const create=SANDBOX_SOURCE.indexOf("createVm(identity.vmName");
+  const bootstrap=SANDBOX_SOURCE.indexOf("bootstrapRepository(identity.vmName");
+  expect(create).toBeGreaterThan(-1);expect(wait).toBeGreaterThan(create);expect(bootstrap).toBeGreaterThan(wait);
+ });
+ test("the probe requires output from the VM, not just a zero exit",()=>expect(EXE_SOURCE).toContain('probe.stdout.includes("atomic-exe-ready")'));
+ test("a lobby REPL answer is never treated as ready",()=>expect(EXE_SOURCE).toContain("/exe\\.dev repl/i.test(output)"));
+ test("the wait is bounded and reports the last error",()=>{expect(EXE_SOURCE).toContain("did not present a shell within");expect(EXE_SOURCE).toContain("timeoutMs=180_000")});
+ test("a lobby answer produces an actionable message naming the billable VM",()=>{expect(EXE_SOURCE).toContain("sawLobby");expect(EXE_SOURCE).toContain("exists and is billable");expect(EXE_SOURCE).toContain("exe.dev rm ${vm}")});
+})
