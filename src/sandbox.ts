@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
 import type { ExtensionContext } from "@bastani/atomic";
-import { validatePortableConfig, transferPortableConfig } from "./config.js";
+import { formatTransferPlan, portableTransferPlan, transferPortableConfig, validatePortableConfig } from "./config.js";
 import { accountFingerprint, createVm, deleteVm, discover, githubIntegration, setComment, vmSshAllowFailure, waitForVmShell, VM_HOST_KEY_ARGS } from "./exe.js";
 import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
 import { generationTag, identityForGit, newGeneration, vmNameFor } from "./identity.js";
@@ -66,7 +67,9 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
   else throw new Error(`sandbox ${existing.vm.vm_name} is ${existing.health}; destroy it before creating a new one`);
  }else{generation=newGeneration();vmName=vmNameFor(identity,generation)}
  const packages=validatePortableConfig();
- if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`This securely streams portable Atomic config, MCP credentials, model auth, skills, prompts, themes, and local extension source to ${vmName}. Sessions, caches, binaries, node_modules, and Git package caches are excluded and Linux dependencies are rebuilt.`);if(!ok)throw new Error("sandbox creation cancelled")}
+ // Show exactly what will leave the machine, rather than describing it in prose.
+ const plan=portableTransferPlan();
+ if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`These paths will be streamed to ${vmName} over SSH:\n\n${formatTransferPlan(plan)}\n\nLocal packages: ${packages.map(p=>basename(p.source)).join(", ")||"none"}. Nothing else in the Atomic agent directory is sent — sessions, caches, run history, and binaries stay on this machine.`);if(!ok)throw new Error("sandbox creation cancelled")}
  const manifest=initialManifest(git,identity,{vmName,generation,account});
  try{
   await progress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
@@ -75,7 +78,8 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
   // step below would fail with 'command not found' if it started immediately.
   await progress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(vmName);
   await progress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(vmName,manifest);
-  await progress(ctx,"Copying portable Atomic config and credentials…");await transferPortableConfig(vmName,packages);
+  await progress(ctx,"Copying portable Atomic config and credentials…");const sent=await transferPortableConfig(vmName,packages);
+  if(ctx.hasUI)ctx.ui.notify(`Transferred to ${vmName}:\n${formatTransferPlan(sent)}`,"info");
   await progress(ctx,"Installing Linux dependencies…");finalize(vmName,manifest,packages);
   await progress(ctx,options.startDefault===false?"Preparing sandbox sessions…":"Starting sandbox session #1…");initializeSessions(vmName,manifest,options.startDefault!==false);
   await progress(ctx,"Verifying the remote session…");setComment(vmName,`atomic ${git.owner}/${git.repo}:${git.branch} ${identity.shortId}`);

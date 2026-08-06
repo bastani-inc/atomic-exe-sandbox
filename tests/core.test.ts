@@ -248,3 +248,33 @@ describe("the creating exe.dev account is recorded",()=>{
  test("the fingerprint is a hash, never the address itself",()=>{expect(EXE_SOURCE).toContain('createHash("sha256").update(email)');expect(EXE_SOURCE).not.toContain("accountCache=email")});
  test("creation tags the VM with its generation",()=>expect(SANDBOX_SOURCE).toContain("[...identity.tags,generationTag(generation)]"));
 })
+
+import { formatTransferPlan, portableTransferPlan, type TransferEntry } from "../src/config.js";
+describe("only allowlisted config leaves the machine",()=>{
+ // The transfer used to be a denylist, so anything new in the agent directory shipped by
+ // default. run-history.jsonl — the same kind of data as the excluded sessions directory —
+ // was reaching every sandbox because nobody had thought to exclude it.
+ const listed=CONFIG_SOURCE.slice(CONFIG_SOURCE.indexOf("const AGENT_MEMBERS"),CONFIG_SOURCE.indexOf("MEMBER_EXCLUDES"));
+ test("the agent directory is not shipped wholesale",()=>{expect(CONFIG_SOURCE).not.toContain('members=[".atomic/agent"]');expect(CONFIG_SOURCE).not.toContain("const EXCLUDES")});
+ test("tar is given named members, not a directory plus excludes",()=>expect(CONFIG_SOURCE).toContain("plan.map(entry=>entry.path)"));
+ for(const denied of ["run-history","sessions","cache","backups","trust.json","pi-crash"]) test(`${denied} is not on the allowlist`,()=>expect(listed).not.toContain(denied));
+ for(const allowed of ["settings.json","auth.json","extensions","skills","prompts","themes"]) test(`${allowed} is on the allowlist`,()=>expect(listed).toContain(allowed));
+ test("a transfer with nothing to send fails loudly instead of silently",()=>expect(CONFIG_SOURCE).toContain("nothing to transfer: none of"));
+
+ test("the plan reports real paths and sizes for this machine",()=>{
+  const plan=portableTransferPlan();
+  for(const entry of plan){expect(entry.path.startsWith(".atomic/agent/")||entry.path===".agents/skills").toBe(true);expect(entry.bytes).toBeGreaterThanOrEqual(0)}
+  expect(plan.some(e=>e.path.includes("run-history"))).toBe(false);
+ });
+ test("credential-shaped names are flagged",()=>{
+  const entries:TransferEntry[]=[{path:".atomic/agent/auth.json",bytes:5039,secret:true},{path:".atomic/agent/settings.json",bytes:410,secret:false}];
+  const text=formatTransferPlan(entries);
+  expect(text).toContain("auth.json — 4.9 KB (secret)");
+  expect(text).toContain("settings.json — 410 B");
+  expect(text).toContain("total 5.3 KB");
+ });
+ test("the plan never carries file contents, only sizes",()=>{const plan=portableTransferPlan();for(const entry of plan)expect(Object.keys(entry).sort()).toEqual(["bytes","path","secret"])});
+ test("an empty plan says so rather than rendering an empty list",()=>expect(formatTransferPlan([])).toBe("Nothing to transfer."));
+ test("the user is shown the plan before approving the transfer",()=>{expect(SANDBOX_SOURCE).toContain("These paths will be streamed to");expect(SANDBOX_SOURCE).toContain("formatTransferPlan(plan)")});
+ test("what actually went is reported afterwards",()=>expect(SANDBOX_SOURCE).toContain("formatTransferPlan(sent)"));
+})
