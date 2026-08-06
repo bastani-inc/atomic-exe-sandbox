@@ -124,3 +124,15 @@ describe("exe.dev GitHub integration binding",()=>{
   expect(args).toContain("--tag=atomic-sandbox");
  });
 })
+
+import { parseGitHubRemote as parseRemote } from "../src/git.js";
+describe("SSH alias remotes",()=>{
+ // Mirrors ~/.ssh/config style aliases: `Host agit` -> `HostName github.com`.
+ const resolve=(host:string)=>({agit:"github.com",ngit:"github.com",work:"gitlab.com"})[host];
+ test("accepts an alias that resolves to github.com",()=>expect(parseRemote("agit:bastani-inc/atomic.git",resolve)).toEqual({owner:"bastani-inc",repo:"atomic",canonicalRepo:"github.com/bastani-inc/atomic"}));
+ test("accepts an alias without the .git suffix",()=>expect(parseRemote("ngit:owner/repo",resolve).repo).toBe("repo"));
+ test("rejects an alias that resolves elsewhere",()=>expect(()=>parseRemote("work:owner/repo",resolve)).toThrow("must be a GitHub repository"));
+ test("rejects an unresolvable alias",()=>expect(()=>parseRemote("nope:owner/repo",resolve)).toThrow("must be a GitHub repository"));
+ test("still rejects a non-GitHub URL",()=>expect(()=>parseRemote("https://example.com/x/y.git",resolve)).toThrow("must be a GitHub repository"));
+ test("literal github.com forms do not need resolution",()=>{let called=false;const spy=(h:string)=>{called=true;return resolve(h)};expect(parseRemote("git@github.com:a/b.git",spy).owner).toBe("a");expect(called).toBe(false)});
+})

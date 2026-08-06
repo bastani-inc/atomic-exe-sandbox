@@ -9,12 +9,34 @@ function gitOptional(cwd: string, ...args: string[]): string | undefined {
 	return result.exitCode === 0 ? result.stdout.trim() : undefined;
 }
 
-export function parseGitHubRemote(remote: string) {
-	const match = remote
-		.trim()
-		.match(
-			/^(?:git@github\.com:|https:\/\/github\.com\/|ssh:\/\/git@github\.com\/)([^/]+)\/([^/]+?)(?:\.git)?$/i,
+/** Resolves an SSH host alias to its real hostname via the local SSH config. */
+export function resolveSshHost(host: string): string | undefined {
+	const result = runAllowFailure("ssh", ["-G", host]);
+	if (result.exitCode !== 0) return undefined;
+	return result.stdout
+		.split("\n")
+		.find((line) => line.startsWith("hostname "))
+		?.slice("hostname ".length)
+		.trim();
+}
+
+export function parseGitHubRemote(
+	remote: string,
+	resolveHost: (host: string) => string | undefined = resolveSshHost,
+) {
+	const trimmed = remote.trim();
+	let match = trimmed.match(
+		/^(?:git@github\.com:|https:\/\/github\.com\/|ssh:\/\/git@github\.com\/)([^/]+)\/([^/]+?)(?:\.git)?$/i,
+	);
+	if (!match) {
+		// scp-style `host:owner/repo`, where host may be an SSH config alias such as
+		// `agit:` that resolves to github.com. Resolve it before rejecting the remote.
+		const scp = trimmed.match(
+			/^(?:[^@/:]+@)?([A-Za-z0-9._-]+):([^/]+)\/([^/]+?)(?:\.git)?$/,
 		);
+		if (scp && resolveHost(scp[1])?.toLowerCase() === "github.com")
+			match = [trimmed, scp[2], scp[3]] as RegExpMatchArray;
+	}
 	if (!match)
 		throw new Error(
 			`origin/upstream must be a GitHub repository, got: ${remote}`,
