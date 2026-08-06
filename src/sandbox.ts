@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import type { ExtensionContext } from "@bastani/atomic";
 import { validatePortableConfig, transferPortableConfig } from "./config.js";
-import { createVm, deleteVm, discover, githubIntegration, listVms, readManifest, setComment, vmSshAllowFailure, waitForVmShell, VM_HOST_KEY_ARGS } from "./exe.js";
+import { accountFingerprint, createVm, deleteVm, discover, githubIntegration, setComment, vmSshAllowFailure, waitForVmShell, VM_HOST_KEY_ARGS } from "./exe.js";
 import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
-import { identityForGit } from "./identity.js";
+import { generationTag, identityForGit, newGeneration, vmNameFor } from "./identity.js";
 import { startHerdrBridge } from "./herdr.js";
 import { bootstrapRepository, cleanSandbox, finalize, guardDestroy, initialManifest, markManifestError } from "./remote.js";
 import { ensureRemoteSession, initializeSessions, listRemoteSessions, type SandboxSession } from "./sessions.js";
-import type { DiscoveredSandbox } from "./types.js";
+import type { DiscoveredSandbox, GitContext, SandboxIdentity } from "./types.js";
 
 const PROGRESS_KEY="atomic-exe-sandbox-progress";
 async function progress(ctx:ExtensionContext,message:string):Promise<void>{
@@ -23,13 +23,28 @@ export function clearProgress(ctx:ExtensionContext):void{
  ctx.ui.setWidget(PROGRESS_KEY,undefined);
 }
 
+/**
+ * A VM is matched by its identity tag and manifest, never by its name. The name is unique
+ * per creation so that destroying and recreating a branch's sandbox never reuses a name
+ * exe.dev is still routing to its lobby.
+ */
+export function claimMatches(found:DiscoveredSandbox,identity:SandboxIdentity,git:Pick<GitContext,"canonicalRepo"|"branchRef">):boolean{
+ const {vm,manifest}=found;
+ if(!manifest)return false;
+ if(!vm.tags?.includes(identity.idTag))return false;
+ if(manifest.identity!==identity.id||manifest.canonicalRepo!==git.canonicalRepo||manifest.branchRef!==git.branchRef)return false;
+ // A generation recorded in the manifest must still be the one tagged on the VM.
+ if(manifest.generation&&!vm.tags.includes(generationTag(manifest.generation)))return false;
+ return true;
+}
 export function exactSandbox(cwd:string):DiscoveredSandbox{
  const git=inspectGitIdentity(cwd),identity=identityForGit(git);
- const matches=discover().filter(({vm,manifest})=>vm.vm_name===identity.vmName&&manifest?.identity===identity.id&&manifest.canonicalRepo===git.canonicalRepo&&manifest.branchRef===git.branchRef);
+ const matches=discover().filter(found=>claimMatches(found,identity,git));
  if(matches.length===0)throw new Error(`no sandbox exists for ${git.owner}/${git.repo}:${git.branch}`);
  if(matches.length!==1)throw new Error(`ambiguous sandbox identity: found ${matches.length} validated VMs for ${git.owner}/${git.repo}:${git.branch}`);
  const found=matches[0];
  if(!found.manifest||found.health==="invalid"||found.health==="unreachable")throw new Error(`sandbox ${found.vm.vm_name} is ${found.health}: ${found.detail??"manifest validation failed"}`);
+ if(found.manifest.account&&found.manifest.account!==accountFingerprint())throw new Error(`sandbox ${found.vm.vm_name} was created by a different exe.dev account`);
  return found;
 }
 export function listText():string{
@@ -37,31 +52,35 @@ export function listText():string{
  return sandboxes.map(s=>{const m=s.manifest;return`${s.vm.vm_name.padEnd(55)} ${s.health.padEnd(11)} ${m?`${m.owner}/${m.repo}:${m.branch}`:(s.detail??"")}`}).join("\n");
 }
 export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean}={}):Promise<DiscoveredSandbox>{
- const git=inspectPublishedGit(cwd),identity=identityForGit(git),existingVms=listVms(),sameName=existingVms.find(v=>v.vm_name===identity.vmName);
- let reuse=false;
- if(sameName){
-  const inspected=readManifest(sameName),manifest=inspected.manifest;
-  const matches=manifest?.identity===identity.id&&manifest.canonicalRepo===git.canonicalRepo&&manifest.branchRef===git.branchRef;
-  if(matches&&inspected.health==="ready")return inspected;
-  if(matches&&(inspected.health==="creating"||inspected.health==="error"))reuse=true;
-  else throw new Error(`VM name collision: ${identity.vmName} exists but does not match this published branch`);
- }
+ const git=inspectPublishedGit(cwd),identity=identityForGit(git),account=accountFingerprint();
+ // Existing sandboxes are found by identity tag, not by name, so a half-built VM from a
+ // previous attempt is still recognised even though its name is unique to that attempt.
+ const claimed=discover().filter(found=>claimMatches(found,identity,git));
+ if(claimed.length>1)throw new Error(`ambiguous sandbox identity: found ${claimed.length} validated VMs for ${git.owner}/${git.repo}:${git.branch}`);
+ const existing=claimed[0];
+ let reuse=false,vmName:string,generation:string;
+ if(existing?.manifest){
+  if(existing.manifest.account&&existing.manifest.account!==account)throw new Error(`sandbox ${existing.vm.vm_name} was created by a different exe.dev account`);
+  if(existing.health==="ready")return existing;
+  if(existing.health==="creating"||existing.health==="error"){reuse=true;vmName=existing.vm.vm_name;generation=existing.manifest.generation??newGeneration()}
+  else throw new Error(`sandbox ${existing.vm.vm_name} is ${existing.health}; destroy it before creating a new one`);
+ }else{generation=newGeneration();vmName=vmNameFor(identity,generation)}
  const packages=validatePortableConfig();
- if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`This securely streams portable Atomic config, MCP credentials, model auth, skills, prompts, themes, and local extension source to ${identity.vmName}. Sessions, caches, binaries, node_modules, and Git package caches are excluded and Linux dependencies are rebuilt.`);if(!ok)throw new Error("sandbox creation cancelled")}
- const manifest=initialManifest(git,identity);
+ if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`This securely streams portable Atomic config, MCP credentials, model auth, skills, prompts, themes, and local extension source to ${vmName}. Sessions, caches, binaries, node_modules, and Git package caches are excluded and Linux dependencies are rebuilt.`);if(!ok)throw new Error("sandbox creation cancelled")}
+ const manifest=initialManifest(git,identity,{vmName,generation,account});
  try{
   await progress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
-  if(!reuse){const integration=githubIntegration(git.owner,git.repo);await progress(ctx,"Creating VM…");createVm(identity.vmName,identity.tags,integration)}
+  if(!reuse){const integration=githubIntegration(git.owner,git.repo);await progress(ctx,"Creating VM…");createVm(vmName,[...identity.tags,generationTag(generation)],integration)}
   // exe.dev answers on its lobby REPL until the VM shell is routable, so every remote
   // step below would fail with 'command not found' if it started immediately.
-  await progress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(identity.vmName);
-  await progress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(identity.vmName,manifest);
-  await progress(ctx,"Copying portable Atomic config and credentials…");await transferPortableConfig(identity.vmName,packages);
-  await progress(ctx,"Installing Linux dependencies…");finalize(identity.vmName,manifest,packages);
-  await progress(ctx,options.startDefault===false?"Preparing sandbox sessions…":"Starting sandbox session #1…");initializeSessions(identity.vmName,manifest,options.startDefault!==false);
-  await progress(ctx,"Verifying the remote session…");setComment(identity.vmName,`atomic ${git.owner}/${git.repo}:${git.branch} ${identity.shortId}`);
+  await progress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(vmName);
+  await progress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(vmName,manifest);
+  await progress(ctx,"Copying portable Atomic config and credentials…");await transferPortableConfig(vmName,packages);
+  await progress(ctx,"Installing Linux dependencies…");finalize(vmName,manifest,packages);
+  await progress(ctx,options.startDefault===false?"Preparing sandbox sessions…":"Starting sandbox session #1…");initializeSessions(vmName,manifest,options.startDefault!==false);
+  await progress(ctx,"Verifying the remote session…");setComment(vmName,`atomic ${git.owner}/${git.repo}:${git.branch} ${identity.shortId}`);
   return exactSandbox(cwd)
- }catch(error){const message=(error as Error).message;try{markManifestError(identity.vmName,message)}catch{}try{setComment(identity.vmName,`atomic-exe-sandbox error: ${message.slice(0,150)}`)}catch{}throw error}
+ }catch(error){const message=(error as Error).message;try{markManifestError(vmName,message)}catch{}try{setComment(vmName,`atomic-exe-sandbox error: ${message.slice(0,150)}`)}catch{}throw error}
  finally{clearProgress(ctx)}
 }
 export function sandboxSessions(cwd:string){const found=exactSandbox(cwd);return listRemoteSessions(found.vm.vm_name)}

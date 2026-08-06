@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { parseManifest } from "./manifest.js";
 import { run, runAllowFailure } from "./process.js";
 import type { DiscoveredSandbox, ExeVm, SandboxManifest } from "./types.js";
@@ -29,6 +30,20 @@ export function vmHost(vm:string):string{return sshDestinations.get(vm)??`${vm}.
 export function vmSshArgs(vm:string):string[]{return [...SSH_BASE,...VM_HOST_KEY_ARGS,vmHost(vm)]}
 
 export function exe(...args:string[]):string { return run("ssh",[...SSH_BASE,"exe.dev",remoteCommand(args)]).stdout }
+
+/**
+ * A stable, non-secret fingerprint of the authenticated exe.dev account. Recorded in the
+ * manifest so a sandbox created by one account is never adopted or destroyed by another.
+ */
+let accountCache:string|undefined;
+export function accountFingerprint():string{
+ if(accountCache)return accountCache;
+ const raw=exe("whoami");
+ const email=(raw.match(/Email Address:\s*(\S+)/i)?.[1]??raw.trim()).toLowerCase();
+ if(!email)throw new Error("could not determine the authenticated exe.dev account");
+ accountCache=createHash("sha256").update(email).digest("hex").slice(0,16);
+ return accountCache;
+}
 export function vmSsh(vm:string,...args:string[]):string { return run("ssh",[...vmSshArgs(vm),remoteCommand(args)]).stdout }
 export function vmSshAllowFailure(vm:string,...args:string[]){ return runAllowFailure("ssh",[...vmSshArgs(vm),remoteCommand(args)]) }
 export function vmScript(vm:string,script:string,args:string[]=[]):string {

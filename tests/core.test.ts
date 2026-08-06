@@ -6,7 +6,7 @@ import { parseManifest } from "../src/manifest.js";
 import { CHECKOUT_ROOT, HERDR_SESSION_NAME, MANIFEST_SCHEMA } from "../src/types.js";
 
 describe("identity",()=>{
- test("is stable for repo and branch across paths",()=>{const a=identityForGit({canonicalRepo:"github.com/y-n-lab/lapersona.ai",branchRef:"refs/heads/preview",repo:"lapersona.ai",branch:"preview"});const b=identityForGit({canonicalRepo:"github.com/y-n-lab/lapersona.ai",branchRef:"refs/heads/preview",repo:"lapersona.ai",branch:"preview"});expect(a.id).toBe(b.id);expect(a.vmName).toMatch(/^atomic-lapersona-ai-preview-[a-f0-9]{12}$/)})
+ test("is stable for repo and branch across paths",()=>{const a=identityForGit({canonicalRepo:"github.com/y-n-lab/lapersona.ai",branchRef:"refs/heads/preview",repo:"lapersona.ai",branch:"preview"});const b=identityForGit({canonicalRepo:"github.com/y-n-lab/lapersona.ai",branchRef:"refs/heads/preview",repo:"lapersona.ai",branch:"preview"});expect(a.id).toBe(b.id);expect(a.vmNameBase).toBe(b.vmNameBase);expect(a.vmNameBase).toMatch(/^atomic-lapersona-ai-preview-[a-f0-9]{12}$/)})
  test("changes with branch",()=>{const base={canonicalRepo:"github.com/a/r",repo:"r"};expect(identityForGit({...base,branch:"a",branchRef:"refs/heads/a"}).id).not.toBe(identityForGit({...base,branch:"b",branchRef:"refs/heads/b"}).id)})
  test("slug is hostname-safe",()=>expect(slug("Feature/YN-123: Café")).toBe("feature-yn-123-caf"))
  test("tags identify atomic sandboxes",()=>expect(identityForGit({canonicalRepo:"github.com/a/r",branchRef:"refs/heads/main",repo:"r",branch:"main"}).tags[0]).toBe("atomic-sandbox"))
@@ -15,7 +15,7 @@ describe("GitHub remotes",()=>{for(const remote of ["git@github.com:Y-N-Lab/lape
 describe("manifest",()=>{const id="a".repeat(64),base={schemaVersion:MANIFEST_SCHEMA,identity:id,vmName:"atomic-test",canonicalRepo:"github.com/a/r",owner:"a",repo:"r",branchRef:"refs/heads/main",branch:"main",creationCommit:"b".repeat(40),checkoutPath:`${CHECKOUT_ROOT}/${id}/repo`,state:"ready",createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z"} as const;test("accepts fixed-root manifest",()=>expect(parseManifest(base,"atomic-test").identity).toBe(id));test("rejects traversal",()=>expect(()=>parseManifest({...base,checkoutPath:`${CHECKOUT_ROOT}/${id}/../evil`})).toThrow("escapes"));test("rejects VM mismatch",()=>expect(()=>parseManifest(base,"other")).toThrow("mismatch"))})
 
 describe("hostile identity input",()=>{
- test("branch metacharacters affect data only",()=>{const result=identityForGit({canonicalRepo:"github.com/a/r",branchRef:"refs/heads/x$(touch-pwn)",repo:"r",branch:"x$(touch-pwn)"});expect(result.vmName).toMatch(/^atomic-r-x-touch-pwn-[a-f0-9]{12}$/);expect(result.id).toHaveLength(64)})
+ test("branch metacharacters affect data only",()=>{const result=identityForGit({canonicalRepo:"github.com/a/r",branchRef:"refs/heads/x$(touch-pwn)",repo:"r",branch:"x$(touch-pwn)"});expect(result.vmNameBase).toMatch(/^atomic-r-x-touch-pwn-[a-f0-9]{12}$/);expect(result.id).toHaveLength(64)})
 })
 
 import { allocateSession, emptyRegistry, parseRegistry, parseSession } from "../src/sessions.js";
@@ -162,9 +162,9 @@ describe("a new VM is not usable the moment exe.dev returns",()=>{
  // Observed on a real create: exe.dev answered on its lobby REPL and the bootstrap
  // script came back as `exe.dev repl: command not found`, failing creation at random.
  test("creation waits for a real VM shell before the first remote step",()=>{
-  const wait=SANDBOX_SOURCE.indexOf("waitForVmShell(identity.vmName)");
-  const create=SANDBOX_SOURCE.indexOf("createVm(identity.vmName");
-  const bootstrap=SANDBOX_SOURCE.indexOf("bootstrapRepository(identity.vmName");
+  const wait=SANDBOX_SOURCE.indexOf("waitForVmShell(vmName)");
+  const create=SANDBOX_SOURCE.indexOf("createVm(vmName,");
+  const bootstrap=SANDBOX_SOURCE.indexOf("bootstrapRepository(vmName,");
   expect(create).toBeGreaterThan(-1);expect(wait).toBeGreaterThan(create);expect(bootstrap).toBeGreaterThan(wait);
  });
  test("the probe requires output from the VM, not just a zero exit",()=>expect(EXE_SOURCE).toContain('probe.stdout.includes("atomic-exe-ready")'));
@@ -201,4 +201,50 @@ describe("a piped transfer explains its own failure",()=>{
  test("says so explicitly when neither side spoke",()=>expect(PROCESS_SOURCE).toContain("neither command wrote to stderr"));
  test("swallows the EPIPE that a dead sink causes",()=>expect(PROCESS_SOURCE).toContain('right.stdin.on("error",()=>{})'));
  test("no longer hardcodes tar and ssh in the message",()=>expect(PROCESS_SOURCE).not.toContain("config transfer failed (tar="));
+})
+
+import { generationTag, newGeneration, vmNameFor } from "../src/identity.js";
+import { claimMatches } from "../src/sandbox.js";
+import type { DiscoveredSandbox, ExeVm, SandboxManifest } from "../src/types.js";
+describe("a sandbox is claimed by tags, never by its name",()=>{
+ // exe.dev keeps routing a recently deleted VM name at its lobby for minutes, so a
+ // deterministic name made destroy-then-create produce an unreachable, billable VM.
+ const git={canonicalRepo:"github.com/a/r",branchRef:"refs/heads/main",repo:"r",branch:"main"};
+ const identity=identityForGit(git);
+ const build=(over:Partial<ExeVm>&{manifest?:Partial<SandboxManifest>}={}):DiscoveredSandbox=>{
+  const generation=over.manifest?.generation??"0123abcd";
+  const vm:ExeVm={vm_name:"atomic-r-main-abc-0123abcd",status:"running",ssh_dest:"x.exe.xyz",tags:[...identity.tags,generationTag(generation)],...over};
+  const manifest={identity:identity.id,canonicalRepo:git.canonicalRepo,branchRef:git.branchRef,generation,...over.manifest} as SandboxManifest;
+  return{vm,manifest,health:"ready"};
+ };
+
+ test("generations are unique",()=>{const seen=new Set(Array.from({length:200},()=>newGeneration()));expect(seen.size).toBe(200);for(const g of seen)expect(g).toMatch(/^[a-f0-9]{8}$/)});
+ test("a generated name stays inside exe.dev's 63-character limit",()=>{
+  const long=identityForGit({canonicalRepo:"github.com/a/r",branchRef:"refs/heads/"+"b".repeat(80),repo:"r".repeat(60),branch:"b".repeat(80)});
+  expect(vmNameFor(long,newGeneration()).length).toBeLessThanOrEqual(63);
+ });
+ test("two creations for the same branch never produce the same name",()=>expect(vmNameFor(identity,newGeneration())).not.toBe(vmNameFor(identity,newGeneration())));
+ test("the name is not part of the match",()=>expect(claimMatches(build({vm_name:"something-entirely-different"}),identity,git)).toBe(true));
+ test("a missing identity tag is not a match",()=>expect(claimMatches(build({tags:["atomic-sandbox"]}),identity,git)).toBe(false));
+ test("another branch's identity is not a match",()=>expect(claimMatches(build({manifest:{identity:"f".repeat(64)}}),identity,git)).toBe(false));
+ test("a manifest generation must still be tagged on the VM",()=>expect(claimMatches(build({tags:[...identity.tags,generationTag("deadbeef")],manifest:{generation:"0123abcd"}}),identity,git)).toBe(false));
+ test("a manifest without a generation still matches, for sandboxes made before claims",()=>{
+  const found=build();delete (found.manifest as {generation?:string}).generation;
+  expect(claimMatches(found,identity,git)).toBe(true);
+ });
+ test("a VM with no manifest is never claimed",()=>{const found=build();found.manifest=undefined;expect(claimMatches(found,identity,git)).toBe(false)});
+})
+describe("claim fields survive manifest validation",()=>{
+ const id="a".repeat(64);
+ const base={schemaVersion:MANIFEST_SCHEMA,identity:id,vmName:"atomic-test",canonicalRepo:"github.com/a/r",owner:"a",repo:"r",branchRef:"refs/heads/main",branch:"main",creationCommit:"b".repeat(40),checkoutPath:`${CHECKOUT_ROOT}/${id}/repo`,state:"ready",createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z"} as const;
+ test("accepts a well-formed claim",()=>{const m=parseManifest({...base,generation:"0123abcd",account:"0".repeat(16)});expect(m.generation).toBe("0123abcd");expect(m.account).toBe("0".repeat(16))});
+ test("still accepts a manifest with no claim at all",()=>expect(parseManifest(base).generation).toBeUndefined());
+ test("rejects a malformed generation",()=>expect(()=>parseManifest({...base,generation:"nope"})).toThrow("generation is invalid"));
+ test("rejects a malformed account fingerprint",()=>expect(()=>parseManifest({...base,account:"short"})).toThrow("account fingerprint is invalid"));
+})
+describe("the creating exe.dev account is recorded",()=>{
+ test("creation fingerprints the account and stores it in the manifest",()=>{expect(SANDBOX_SOURCE).toContain("account=accountFingerprint()");expect(SANDBOX_SOURCE).toContain("{vmName,generation,account}")});
+ test("another account cannot adopt or enter the sandbox",()=>expect(SANDBOX_SOURCE.match(/was created by a different exe\.dev account/g)?.length).toBe(2));
+ test("the fingerprint is a hash, never the address itself",()=>{expect(EXE_SOURCE).toContain('createHash("sha256").update(email)');expect(EXE_SOURCE).not.toContain("accountCache=email")});
+ test("creation tags the VM with its generation",()=>expect(SANDBOX_SOURCE).toContain("[...identity.tags,generationTag(generation)]"));
 })

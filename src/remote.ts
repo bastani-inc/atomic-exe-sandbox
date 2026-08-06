@@ -31,12 +31,15 @@ function encoded(value: unknown): string {
 export function initialManifest(
 	git: GitContext,
 	id: SandboxIdentity,
+	claim: { vmName: string; generation: string; account: string },
 ): SandboxManifest {
 	const now = new Date().toISOString();
 	return {
 		schemaVersion: MANIFEST_SCHEMA,
 		identity: id.id,
-		vmName: id.vmName,
+		vmName: claim.vmName,
+		generation: claim.generation,
+		account: claim.account,
 		canonicalRepo: git.canonicalRepo,
 		owner: git.owner,
 		repo: git.repo,
