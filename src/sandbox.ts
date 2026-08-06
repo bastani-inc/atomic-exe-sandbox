@@ -9,20 +9,9 @@ import { startHerdrBridge } from "./herdr.js";
 import { bootstrapRepository, cleanSandbox, finalize, guardDestroy, initialManifest, markManifestError } from "./remote.js";
 import { ensureRemoteSession, initializeSessions, listRemoteSessions, type SandboxSession } from "./sessions.js";
 import type { DiscoveredSandbox, GitContext, SandboxIdentity } from "./types.js";
+import { PASS, type Paint, paintFor, PLAIN_PAINT, clearProgress, showProgress } from "./ui.js";
 
-const PROGRESS_KEY="atomic-exe-sandbox-progress";
-async function progress(ctx:ExtensionContext,message:string):Promise<void>{
- if(!ctx.hasUI)return;
- const text=`⏳ exe.dev · ${message}`;
- ctx.ui.setStatus(PROGRESS_KEY,text);
- ctx.ui.setWidget(PROGRESS_KEY,["",text],{placement:"aboveEditor"});
- await new Promise(resolve=>setTimeout(resolve,50));
-}
-export function clearProgress(ctx:ExtensionContext):void{
- if(!ctx.hasUI)return;
- ctx.ui.setStatus(PROGRESS_KEY,undefined);
- ctx.ui.setWidget(PROGRESS_KEY,undefined);
-}
+export { clearProgress };
 
 /**
  * A VM is matched by its identity tag and manifest, never by its name. The name is unique
@@ -48,9 +37,12 @@ export function exactSandbox(cwd:string):DiscoveredSandbox{
  if(found.manifest.account&&found.manifest.account!==accountFingerprint())throw new Error(`sandbox ${found.vm.vm_name} was created by a different exe.dev account`);
  return found;
 }
-export function listText():string{
- const sandboxes=discover();if(!sandboxes.length)return"No atomic-exe sandboxes found.";
- return sandboxes.map(s=>{const m=s.manifest;return`${s.vm.vm_name.padEnd(55)} ${s.health.padEnd(11)} ${m?`${m.owner}/${m.repo}:${m.branch}`:(s.detail??"")}`}).join("\n");
+export function listText(paint:Paint=PLAIN_PAINT):string{
+ const sandboxes=discover();if(!sandboxes.length)return paint.dim("No atomic-exe sandboxes found.");
+ return sandboxes.map(s=>{
+  const m=s.manifest,tint=s.health==="ready"?paint.ok:s.health==="creating"?paint.warn:paint.bad;
+  return `${tint(s.vm.vm_name.padEnd(55))} ${tint(s.health.padEnd(11))} ${paint.dim(m?`${m.owner}/${m.repo}:${m.branch}`:(s.detail??""))}`;
+ }).join("\n");
 }
 export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean}={}):Promise<DiscoveredSandbox>{
  const git=inspectPublishedGit(cwd),identity=identityForGit(git),account=accountFingerprint();
@@ -72,17 +64,17 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
  if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`These paths will be streamed to ${vmName} over SSH:\n\n${formatTransferPlan(plan)}\n\nLocal packages: ${packages.map(p=>basename(p.source)).join(", ")||"none"}. Nothing else in the Atomic agent directory is sent — sessions, caches, run history, and binaries stay on this machine.`);if(!ok)throw new Error("sandbox creation cancelled")}
  const manifest=initialManifest(git,identity,{vmName,generation,account});
  try{
-  await progress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
-  if(!reuse){const integration=githubIntegration(git.owner,git.repo);await progress(ctx,"Creating VM…");createVm(vmName,[...identity.tags,generationTag(generation)],integration)}
+  await showProgress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
+  if(!reuse){const integration=githubIntegration(git.owner,git.repo);await showProgress(ctx,"Creating VM…");createVm(vmName,[...identity.tags,generationTag(generation)],integration)}
   // exe.dev answers on its lobby REPL until the VM shell is routable, so every remote
   // step below would fail with 'command not found' if it started immediately.
-  await progress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(vmName);
-  await progress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(vmName,manifest);
-  await progress(ctx,"Copying portable Atomic config and credentials…");const sent=await transferPortableConfig(vmName,packages);
-  if(ctx.hasUI)ctx.ui.notify(`Transferred to ${vmName}:\n${formatTransferPlan(sent)}`,"info");
-  await progress(ctx,"Installing Linux dependencies…");finalize(vmName,manifest,packages);
-  await progress(ctx,options.startDefault===false?"Preparing sandbox sessions…":"Starting sandbox session #1…");initializeSessions(vmName,manifest,options.startDefault!==false);
-  await progress(ctx,"Verifying the remote session…");setComment(vmName,`atomic ${git.owner}/${git.repo}:${git.branch} ${identity.shortId}`);
+  await showProgress(ctx,"Waiting for the VM to accept connections…");waitForVmShell(vmName);
+  await showProgress(ctx,"Cloning and verifying the published branch…");bootstrapRepository(vmName,manifest);
+  await showProgress(ctx,"Copying portable Atomic config and credentials…");const sent=await transferPortableConfig(vmName,packages);
+  if(ctx.hasUI){const paint=paintFor(ctx);ctx.ui.notify(`${paint.ok(`${PASS} Transferred to ${vmName}`)}\n${paint.dim(formatTransferPlan(sent))}`,"info")}
+  await showProgress(ctx,"Installing Linux dependencies…");finalize(vmName,manifest,packages);
+  await showProgress(ctx,options.startDefault===false?"Preparing sandbox sessions…":"Starting sandbox session #1…");initializeSessions(vmName,manifest,options.startDefault!==false);
+  await showProgress(ctx,"Verifying the remote session…");setComment(vmName,`atomic ${git.owner}/${git.repo}:${git.branch} ${identity.shortId}`);
   return exactSandbox(cwd)
  }catch(error){const message=(error as Error).message;try{markManifestError(vmName,message)}catch{}try{setComment(vmName,`atomic-exe-sandbox error: ${message.slice(0,150)}`)}catch{}throw error}
  finally{clearProgress(ctx)}

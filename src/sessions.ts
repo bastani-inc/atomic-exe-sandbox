@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import { VM_HOST_KEY_ARGS, vmScript, vmSsh } from "./exe.js";
 import { pipeBuffer } from "./process.js";
 import { HERDR_SESSION_NAME, type SandboxManifest } from "./types.js";
+import {
+	type Paint,
+	PLAIN_PAINT,
+	RUNNING,
+	STOPPED,
+} from "./ui.js";
 
 export interface SandboxSession {
 	id: number;
@@ -241,16 +247,31 @@ export function rollbackTransferredSession(vm: string, id: number): void {
 	);
 }
 
-export function formatSessions(sessions: SessionStatus[]): string {
-	if (sessions.length === 0) return "No Atomic sessions in this sandbox.";
+export function formatSessions(
+	sessions: SessionStatus[],
+	paint: Paint = PLAIN_PAINT,
+): string {
+	if (sessions.length === 0)
+		return paint.dim("No Atomic sessions in this sandbox.");
 	return sessions
 		.map((session) => {
+			// Attached is the session the user is looking at, so it reads in the accent
+			// colour rather than in the green that only means "the process is up".
 			const state = session.running
 				? session.attached
 					? "attached"
 					: "running"
 				: "stopped";
-			return `#${session.id}  ${state}${session.transferred ? "  transferred" : ""}`;
+			const tint = session.running
+				? session.attached
+					? paint.accent
+					: paint.ok
+				: paint.dim;
+			const glyph = session.running ? RUNNING : STOPPED;
+			const transferred = session.transferred
+				? paint.dim("  transferred")
+				: "";
+			return `${tint(`${glyph} #${session.id}`)}  ${tint(state)}${transferred}`;
 		})
 		.join("\n");
 }

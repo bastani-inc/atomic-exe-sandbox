@@ -304,3 +304,73 @@ describe("doctor preflight",()=>{
  test("passing checks do not print a fix",()=>expect(formatChecks([{name:"a",ok:true,detail:"fine",fix:"unused"}])).not.toContain("fix:"));
  test("the command is wired up and advertised",()=>{expect(INDEX_SOURCE).toContain('command === "doctor"');expect(INDEX_SOURCE).toContain("destroy [--force]|doctor")});
 })
+
+import { formatSessions, type SessionStatus } from "../src/sessions.js";
+import { ADVISORY, FAIL, PASS, type Paint, paintFor, PLAIN_PAINT, repaintAfterCommand, RUNNING, STOPPED } from "../src/ui.js";
+import type { ExtensionContext } from "@bastani/atomic";
+/** Tags instead of escape codes, so a test asserts which tone was chosen, not which theme. */
+const tagged:Paint={ok:t=>`<ok>${t}</ok>`,bad:t=>`<bad>${t}</bad>`,warn:t=>`<warn>${t}</warn>`,accent:t=>`<accent>${t}</accent>`,dim:t=>`<dim>${t}</dim>`,bold:t=>`<bold>${t}</bold>`};
+describe("command output carries its own colour",()=>{
+ // ctx.ui.notify paints the whole message dim, so a report that is not coloured before
+ // it is handed over reaches the user as one flat grey block.
+ test("a passing check is green, a failing one red, an advisory amber",()=>{
+  const text=formatChecks([
+   {name:"local tools",ok:true,detail:"present"},
+   {name:"host key",ok:false,detail:"missing",fix:"run `ssh exe.dev`"},
+   {name:"ssh agent",ok:true,warn:true,detail:"no keys loaded"},
+  ],tagged);
+  expect(text).toContain(`<ok>${PASS} local tools</ok>`);
+  expect(text).toContain(`<bad>${FAIL} host key</bad>`);
+  expect(text).toContain(`<warn>${ADVISORY} ssh agent</warn>`);
+  expect(text).toContain("<warn>fix: run `ssh exe.dev`</warn>");
+ });
+ test("the summary states the worst outcome in its own colour",()=>{
+  expect(formatChecks([{name:"a",ok:false,detail:"x"}],tagged)).toContain("<bad>1 of 1 checks failed.</bad>");
+  expect(formatChecks([{name:"a",ok:true,detail:"x"}],tagged)).toContain("<ok>All 1 checks passed.</ok>");
+  expect(formatChecks([{name:"a",ok:true,warn:true,detail:"x"}],tagged)).toContain("<warn>1 advisory to review.</warn>");
+ });
+ test("an advisory never counts as a failure",()=>expect(formatChecks([{name:"a",ok:true,warn:true,detail:"x"}])).toContain("All 1 checks passed."));
+ test("uncoloured output is the default, so print mode never emits escape codes",()=>{
+  expect(formatChecks([{name:"a",ok:true,detail:"x"}])).not.toContain("\u001b[");
+  expect(formatSessions([{id:1,sessionId:"s",createdAt:"t",running:true,attached:false}])).not.toContain("\u001b[");
+ });
+ test("a session reads by glyph and by colour",()=>{
+  const sessions:SessionStatus[]=[
+   {id:1,sessionId:"a",createdAt:"t",running:true,attached:true},
+   {id:2,sessionId:"b",createdAt:"t",running:true,attached:false},
+   {id:3,sessionId:"c",createdAt:"t",running:false,attached:false,transferred:true},
+  ];
+  const text=formatSessions(sessions,tagged);
+  expect(text).toContain(`<accent>${RUNNING} #1</accent>`);
+  expect(text).toContain(`<ok>${RUNNING} #2</ok>`);
+  expect(text).toContain(`<dim>${STOPPED} #3</dim>`);
+  expect(text).toContain("<dim>  transferred</dim>");
+ });
+ test("a headless context paints nothing",()=>expect(paintFor({hasUI:false} as unknown as ExtensionContext)).toBe(PLAIN_PAINT));
+ test("a theme that lacks a colour still returns readable text",()=>{
+  const broken={fg:()=>{throw new Error("Unknown theme color")},bold:()=>{throw new Error("no")}};
+  const paint=paintFor({hasUI:true,ui:{theme:broken}} as unknown as ExtensionContext);
+  expect(paint.ok("green")).toBe("green");
+  expect(paint.bold("strong")).toBe("strong");
+ });
+})
+
+describe("the Working indicator is taken down without a keystroke",()=>{
+ // The host drops its spinner when the command resolves but never asks for a repaint,
+ // and an engine-child extension cannot call requestRender, so a scheduled status write
+ // is the only thing left that reaches the host after the command is over.
+ const fakeCtx=()=>{const calls:Array<[string,string|undefined]>=[];return{calls,ctx:{hasUI:true,ui:{setStatus:(key:string,text:string|undefined)=>{calls.push([key,text])}}} as unknown as ExtensionContext}};
+ test("nothing is written while the command is still running",()=>{const {calls,ctx}=fakeCtx();repaintAfterCommand(ctx);expect(calls).toHaveLength(0)});
+ test("the repaint lands after the command resolves",async()=>{
+  const {calls,ctx}=fakeCtx();
+  repaintAfterCommand(ctx);
+  await new Promise(resolve=>setTimeout(resolve,120));
+  expect(calls.length).toBeGreaterThan(0);
+  for(const [key,text] of calls){expect(key).toBe("atomic-exe-sandbox-repaint");expect(text).toBeUndefined()}
+ });
+ test("a headless run stays silent",async()=>{const calls:string[]=[];repaintAfterCommand({hasUI:false,ui:{setStatus:()=>calls.push("x")}} as unknown as ExtensionContext);await new Promise(resolve=>setTimeout(resolve,120));expect(calls).toHaveLength(0)});
+ test("every command path schedules it, including the error path",()=>{
+  expect(INDEX_SOURCE).toContain("} finally {\n\t\trepaintAfterCommand(ctx);\n\t}");
+  expect(INDEX_SOURCE.match(/repaintAfterCommand\(ctx\);/g)?.length).toBe(2);
+ });
+})
