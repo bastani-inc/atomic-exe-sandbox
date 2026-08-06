@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	cleanCurrent,
-	clearProgress,
 	connect,
 	connectCurrent,
 	createSandbox,
@@ -21,6 +20,16 @@ import {
 	rollbackTransferredSession,
 	uploadTransferredSession,
 } from "./sessions.js";
+import {
+	clearProgress,
+	PASS,
+	type Paint,
+	paintFor,
+	repaintAfterCommand,
+	RUNNING,
+	showProgress,
+	STOPPED,
+} from "./ui.js";
 
 const MANIFEST_PATH = join(homedir(), ".atomic-exe", "manifest.json");
 const EXE_GITHUB_HOST = "github.int.exe.xyz";
@@ -72,18 +81,21 @@ async function showOperation(
 	message: string,
 	operation: () => void,
 ): Promise<void> {
-	const key = "atomic-exe-sandbox-progress",
-		text = `⏳ exe.dev · ${message}`;
-	if (ctx.hasUI) {
-		ctx.ui.setStatus(key, text);
-		ctx.ui.setWidget(key, ["", text], { placement: "aboveEditor" });
-		await new Promise((resolve) => setTimeout(resolve, 50));
-	}
+	await showProgress(ctx, message);
 	try {
 		operation();
 	} finally {
 		clearProgress(ctx);
 	}
+}
+
+/** A finished action, in green, with the same glyph the doctor uses for a passing check. */
+function done(ctx: ExtensionCommandContext, paint: Paint, message: string): void {
+	ctx.ui.notify(paint.ok(`${PASS} ${message}`), "info");
+}
+
+function usage(paint: Paint, commands: string): string {
+	return `${paint.dim("Usage:")} ${paint.accent(`/sandbox ${commands}`)}`;
 }
 
 function remoteIdentity(): RemoteIdentity | undefined {
@@ -138,7 +150,8 @@ async function localHandler(
 	const words = args.trim().split(/\s+/).filter(Boolean),
 		command = words[0] ?? "",
 		force = words.includes("--force"),
-		id = parseId(command);
+		id = parseId(command),
+		paint = paintFor(ctx);
 	try {
 		if (!command || id !== undefined) {
 			await connectCurrent(ctx.cwd, ctx, id);
@@ -147,7 +160,7 @@ async function localHandler(
 		if (command === "list") {
 			const found = exactSandbox(ctx.cwd);
 			ctx.ui.notify(
-				formatSessions(listRemoteSessions(found.vm.vm_name)),
+				formatSessions(listRemoteSessions(found.vm.vm_name), paint),
 				"info",
 			);
 			return;
@@ -166,7 +179,7 @@ async function localHandler(
 			await showOperation(ctx, "Cleaning caches…", () => {
 				sandbox = cleanCurrent(ctx.cwd);
 			});
-			ctx.ui.notify(`Cleaned ${sandbox!.vm.vm_name}`, "info");
+			done(ctx, paint, `Cleaned ${sandbox!.vm.vm_name}`);
 			return;
 		}
 		if (command === "destroy") {
@@ -177,6 +190,13 @@ async function localHandler(
 				);
 				if (!ok) return;
 			}
+			// --force skips the confirmation and the work checks with it. Say so in amber
+			// rather than deleting a VM as quietly as any other subcommand.
+			if (force)
+				ctx.ui.notify(
+					"Destroying without the uncommitted, untracked, or unpushed work checks.",
+					"warning",
+				);
 			let name = "";
 			await showOperation(
 				ctx,
@@ -185,23 +205,25 @@ async function localHandler(
 					name = destroyCurrent(ctx.cwd, force);
 				},
 			);
-			ctx.ui.notify(`Destroyed ${name}`, "info");
+			done(ctx, paint, `Destroyed ${name}`);
 			return;
 		}
 		if (command === "doctor") {
 			let report = "";
 			await showOperation(ctx, "Checking sandbox prerequisites…", () => {
-				report = formatChecks(runDoctor(ctx.cwd));
+				report = formatChecks(runDoctor(ctx.cwd), paint);
 			});
 			ctx.ui.notify(report, "info");
 			return;
 		}
 		ctx.ui.notify(
-			"Usage: /sandbox [<id>|list|transfer|create|clean|destroy [--force]|doctor]",
+			usage(paint, "[<id>|list|transfer|create|clean|destroy [--force]|doctor]"),
 			"info",
 		);
 	} catch (error) {
 		ctx.ui.notify((error as Error).message, "error");
+	} finally {
+		repaintAfterCommand(ctx);
 	}
 }
 
@@ -239,9 +261,10 @@ async function transferCurrentSession(
 		vm: sandbox.vm.vm_name,
 		timestamp: Date.now(),
 	});
-	ctx.ui.notify(
+	done(
+		ctx,
+		paintFor(ctx),
 		`Session transferred to sandbox #${remote.id}. Connecting now…`,
-		"info",
 	);
 	await connect(sandbox, ctx, remote.id);
 	ctx.shutdown();
@@ -257,6 +280,7 @@ async function remoteHandler(
 ): Promise<void> {
 	const command = args.trim(),
 		id = parseId(command),
+		paint = paintFor(ctx),
 		ctl = join(homedir(), ".atomic-exe", "sessionctl");
 	try {
 		if (id !== undefined) {
@@ -293,42 +317,47 @@ async function remoteHandler(
 							sessionId: "",
 							createdAt: "",
 						})),
+						paint,
 					),
 					"info",
 				);
 				return;
 			}
+			// The picker renders plain rows, so state is carried by the glyph alone here.
 			const choice = await ctx.ui.select(
 				"Switch sandbox session",
 				sessions.map(
 					(session) =>
-						`#${session.id}  ${session.running ? "running" : "stopped"}`,
+						`${session.running ? RUNNING : STOPPED} #${session.id}  ${session.running ? "running" : "stopped"}`,
 				),
 			);
 			if (!choice) return;
-			const selected = Number(choice.match(/^#(\d+)/)?.[1]);
+			const selected = Number(choice.match(/#(\d+)/)?.[1]);
 			if (selected) await remoteHandler(atomic, String(selected), ctx, remote);
 			return;
 		}
 		if (command === "status" || !command) {
 			ctx.ui.notify(
-				`${remoteStatus()}\n${remote.owner}/${remote.repo}:${remote.branch}\nVM: ${remote.vmName}`,
+				[
+					paint.accent(remoteStatus()),
+					`${remote.owner}/${remote.repo}:${remote.branch}`,
+					paint.dim(`VM: ${remote.vmName}`),
+				].join("\n"),
 				"info",
 			);
 			return;
 		}
 		if (command === "detach") {
-			ctx.ui.notify("Detaching from sandbox…", "info");
+			ctx.ui.notify(paint.dim("Detaching from sandbox…"), "info");
 			const result = await atomic.exec(ctl, ["detach"]);
 			if (result.code !== 0) throw new Error(result.stderr || result.stdout);
 			return;
 		}
-		ctx.ui.notify(
-			"Usage: /sandbox [<id>|new|switch|list|status|detach]",
-			"info",
-		);
+		ctx.ui.notify(usage(paint, "[<id>|new|switch|list|status|detach]"), "info");
 	} catch (error) {
 		ctx.ui.notify((error as Error).message, "error");
+	} finally {
+		repaintAfterCommand(ctx);
 	}
 }
 

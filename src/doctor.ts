@@ -4,6 +4,7 @@ import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
 import { identityForGit } from "./identity.js";
 import { runAllowFailure } from "./process.js";
 import { claimMatches } from "./sandbox.js";
+import { ADVISORY, FAIL, PASS, type Paint, PLAIN_PAINT } from "./ui.js";
 
 /**
  * Published by exe.dev at https://exe.dev/docs/faq/host-key.md. Every VM connection is
@@ -16,6 +17,8 @@ export const EXE_HOST_KEY_FINGERPRINT =
 export interface Check {
 	name: string;
 	ok: boolean;
+	/** Passed, but with something the user should know about. Rendered amber, not green. */
+	warn?: boolean;
 	detail: string;
 	fix?: string;
 }
@@ -120,6 +123,7 @@ export function runDoctor(cwd: string): Check[] {
 			const loaded = agent.exitCode === 0;
 			return {
 				ok: true,
+				warn: !loaded,
 				detail: loaded
 					? "ssh-agent has keys loaded"
 					: "no ssh-agent keys; this is fine only if the exe.dev key has no passphrase",
@@ -163,8 +167,11 @@ export function runDoctor(cwd: string): Check[] {
 					detail: `none yet for this branch (${listVms().length} VMs on the account)`,
 				};
 			const found = matches[0];
+			// A VM still being built is not a failure to fix, only a state to wait out.
+			const building = found.health === "creating";
 			return {
-				ok: found.health === "ready",
+				ok: found.health === "ready" || building,
+				warn: building,
 				detail: `${found.vm.vm_name} is ${found.health}`,
 			};
 		}),
@@ -173,16 +180,23 @@ export function runDoctor(cwd: string): Check[] {
 	return checks;
 }
 
-export function formatChecks(checks: Check[]): string {
-	const lines = checks.map((c) => {
-		const head = `${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`;
-		return c.fix && !c.ok ? `${head}\n    fix: ${c.fix}` : head;
+export function formatChecks(checks: Check[], paint: Paint = PLAIN_PAINT): string {
+	const lines = checks.map((check) => {
+		const advisory = check.ok && check.warn === true;
+		const glyph = check.ok ? (advisory ? ADVISORY : PASS) : FAIL;
+		const tint = check.ok ? (advisory ? paint.warn : paint.ok) : paint.bad;
+		const head = `${tint(`${glyph} ${check.name}`)}${paint.dim(`: ${check.detail}`)}`;
+		return check.fix && !check.ok
+			? `${head}\n    ${paint.warn(`fix: ${check.fix}`)}`
+			: head;
 	});
-	const failed = checks.filter((c) => !c.ok).length;
+	const failed = checks.filter((check) => !check.ok).length;
+	const advisories = checks.filter((check) => check.ok && check.warn).length;
+	const summary = failed
+		? paint.bad(`${failed} of ${checks.length} checks failed.`)
+		: paint.ok(`All ${checks.length} checks passed.`);
 	lines.push(
-		failed
-			? `\n${failed} of ${checks.length} checks failed.`
-			: `\nAll ${checks.length} checks passed.`,
+		`\n${summary}${advisories ? ` ${paint.warn(`${advisories} advisory to review.`)}` : ""}`,
 	);
 	return lines.join("\n");
 }
