@@ -3,16 +3,36 @@ import { parseManifest } from "./manifest.js";
 import { run, runAllowFailure } from "./process.js";
 import type { DiscoveredSandbox, ExeVm, SandboxManifest } from "./types.js";
 
-const SSH_BASE = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+export const SSH_BASE = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
 export const VM_HOST_KEY_ARGS = ["-o", "HostKeyAlias=exe.dev"] as const;
 function quote(value:string):string{return `'${value.replaceAll("'",`'"'"'`)}'`}
 function remoteCommand(args:string[]):string{return args.map(quote).join(" ")}
 
+/**
+ * exe.dev returns the SSH destination for each VM as `ssh_dest`. Rebuilding
+ * `<vm_name>.exe.xyz` happens to match today, but the returned value is what exe.dev
+ * actually routes, so prefer it and keep the constructed name only as a fallback.
+ */
+const sshDestinations=new Map<string,string>();
+/** Accepts `[user@]host` only; anything carrying a port or shell metacharacter is ignored. */
+function usableSshDest(value:unknown):string|undefined{
+ if(typeof value!=="string")return undefined;
+ const trimmed=value.trim();
+ return /^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(trimmed)?trimmed:undefined;
+}
+export function rememberSshDest(vm:Partial<ExeVm>|undefined):void{
+ const dest=usableSshDest(vm?.ssh_dest);
+ if(vm?.vm_name&&dest)sshDestinations.set(vm.vm_name,dest);
+}
+export function vmHost(vm:string):string{return sshDestinations.get(vm)??`${vm}.exe.xyz`}
+/** Every VM connection shares one argument prefix so no call site can drift. */
+export function vmSshArgs(vm:string):string[]{return [...SSH_BASE,...VM_HOST_KEY_ARGS,vmHost(vm)]}
+
 export function exe(...args:string[]):string { return run("ssh",[...SSH_BASE,"exe.dev",remoteCommand(args)]).stdout }
-export function vmSsh(vm:string,...args:string[]):string { return run("ssh",[...SSH_BASE,...VM_HOST_KEY_ARGS,`${vm}.exe.xyz`,remoteCommand(args)]).stdout }
-export function vmSshAllowFailure(vm:string,...args:string[]){ return runAllowFailure("ssh",[...SSH_BASE,...VM_HOST_KEY_ARGS,`${vm}.exe.xyz`,remoteCommand(args)]) }
+export function vmSsh(vm:string,...args:string[]):string { return run("ssh",[...vmSshArgs(vm),remoteCommand(args)]).stdout }
+export function vmSshAllowFailure(vm:string,...args:string[]){ return runAllowFailure("ssh",[...vmSshArgs(vm),remoteCommand(args)]) }
 export function vmScript(vm:string,script:string,args:string[]=[]):string {
-  const result=spawnSync("ssh",[...SSH_BASE,...VM_HOST_KEY_ARGS,`${vm}.exe.xyz`,remoteCommand(["bash","-s","--",...args])],{input:script,encoding:"utf8",stdio:["pipe","pipe","pipe"]});
+  const result=spawnSync("ssh",[...vmSshArgs(vm),remoteCommand(["bash","-s","--",...args])],{input:script,encoding:"utf8",stdio:["pipe","pipe","pipe"]});
   if(result.error)throw result.error;
   if(result.status!==0)throw new Error(`remote bootstrap failed (${result.status}): ${String(result.stderr||result.stdout).trim()}`);
   return String(result.stdout||"");
@@ -42,7 +62,7 @@ export function waitForVmShell(vm:string,timeoutMs=180_000):void{
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2_000);
  }
 }
-export function listVms():ExeVm[]{const parsed=JSON.parse(exe("ls","--json")) as {vms:ExeVm[]};return parsed.vms??[]}
+export function listVms():ExeVm[]{const parsed=JSON.parse(exe("ls","--json")) as {vms:ExeVm[]};const vms=parsed.vms??[];for(const vm of vms)rememberSshDest(vm);return vms}
 export interface ExeIntegration { name:string; type:string; team?:boolean; attachments?:string[]; config?:{repositories?:string[]} }
 /** How the repository's GitHub integration must be bound to a new VM. */
 export interface GithubIntegration { name:string; team:boolean; tags:string[] }
@@ -73,7 +93,7 @@ export function vmCreateArgs(vmName:string,tags:string[],integration:GithubInteg
  return["new",`--name=${vmName}`,"--no-email","--json",`--comment=atomic-exe-sandbox creating`,...attach,...merged.map(t=>`--tag=${t}`)];
 }
 export function createVm(vmName:string,tags:string[],integration:GithubIntegration):ExeVm{
- const value=JSON.parse(exe(...vmCreateArgs(vmName,tags,integration)));return (value.vm??value) as ExeVm;
+ const value=JSON.parse(exe(...vmCreateArgs(vmName,tags,integration)));const vm=(value.vm??value) as ExeVm;rememberSshDest(vm);return vm;
 }
 export function deleteVm(vmName:string):void{exe("rm",vmName,"--json")}
 export function setComment(vmName:string,text:string):void{exe("comment",vmName,text,"--json")}

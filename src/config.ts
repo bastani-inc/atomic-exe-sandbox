@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { VM_HOST_KEY_ARGS, vmSsh } from "./exe.js";
+import { vmSsh, vmSshArgs } from "./exe.js";
 import { pipeCommands } from "./process.js";
 
 const HOME=homedir();
@@ -26,6 +26,6 @@ export function validatePortableConfig():LocalPackage[]{walkSymlinks(AGENT);cons
 export async function transferPortableConfig(vm:string,packages:LocalPackage[]):Promise<void>{
  vmSsh(vm,"sh","-lc",`rm -rf "$HOME/.atomic-exe/config-stage"; install -d -m 700 "$HOME/.atomic-exe/config-stage" "$HOME/.atomic-exe/local-packages"`);
  const members=[".atomic/agent"];try{realpathSync(join(HOME,".agents","skills"));members.push(".agents/skills")}catch{}
- await pipeCommands({command:"tar",args:["-C",HOME,...EXCLUDES,"-cf","-",...members]},{command:"ssh",args:["-o","BatchMode=yes",...VM_HOST_KEY_ARGS,`${vm}.exe.xyz`,"tar -C /home/exedev/.atomic-exe/config-stage -xf -"]});
- for(const pkg of packages){vmSsh(vm,"rm","-rf",pkg.remote);await pipeCommands({command:"tar",cwd:dirname(pkg.source),args:["--exclude=.git","--exclude=node_modules","--exclude=*.node","-cf","-",basename(pkg.source)]},{command:"ssh",args:["-o","BatchMode=yes",...VM_HOST_KEY_ARGS,`${vm}.exe.xyz`,"tar -C /home/exedev/.atomic-exe/local-packages -xf -"]})}
+ await pipeCommands({command:"tar",args:["-C",HOME,...EXCLUDES,"-cf","-",...members]},{command:"ssh",args:[...vmSshArgs(vm),"tar -C /home/exedev/.atomic-exe/config-stage -xf -"]});
+ for(const pkg of packages){vmSsh(vm,"rm","-rf",pkg.remote);await pipeCommands({command:"tar",cwd:dirname(pkg.source),args:["--exclude=.git","--exclude=node_modules","--exclude=*.node","-cf","-",basename(pkg.source)]},{command:"ssh",args:[...vmSshArgs(vm),"tar -C /home/exedev/.atomic-exe/local-packages -xf -"]})}
 }

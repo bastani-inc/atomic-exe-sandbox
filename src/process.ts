@@ -10,7 +10,25 @@ export function run(command:string,args:readonly string[],options:SpawnOptions={
 }
 export function runAllowFailure(command:string,args:readonly string[],options:SpawnOptions={}):CommandResult { try{return run(command,args,options)}catch(error){if(error instanceof CommandError)return error.result;throw error} }
 export async function pipeCommands(source:{command:string;args:string[];cwd?:string},sink:{command:string;args:string[]}):Promise<void>{
- await new Promise<void>((resolve,reject)=>{const left=spawn(source.command,source.args,{cwd:source.cwd,stdio:["ignore","pipe","pipe"]});const right=spawn(sink.command,sink.args,{stdio:["pipe","pipe","pipe"]});let le="",re="",lc:number|null=null,rc:number|null=null;left.stderr.on("data",c=>le+=c);right.stderr.on("data",c=>re+=c);left.stdout.pipe(right.stdin);const finish=()=>{if(lc===null||rc===null)return;if(lc===0&&rc===0)resolve();else reject(new Error(`config transfer failed (tar=${lc}, ssh=${rc}): ${le||re}`))};left.on("error",reject);right.on("error",reject);left.on("close",c=>{lc=c;finish()});right.on("close",c=>{rc=c;finish()})});
+ await new Promise<void>((resolve,reject)=>{
+  const left=spawn(source.command,source.args,{cwd:source.cwd,stdio:["ignore","pipe","pipe"]});
+  const right=spawn(sink.command,sink.args,{stdio:["pipe","pipe","pipe"]});
+  let le="",re="",lc:number|null=null,rc:number|null=null;
+  left.stderr.on("data",c=>le+=c);right.stderr.on("data",c=>re+=c);
+  // When the sink exits early the source's writes fail with EPIPE. That is a symptom of
+  // the real failure, so swallow it here and let the exit codes below explain what broke.
+  right.stdin.on("error",()=>{});
+  left.stdout.pipe(right.stdin);
+  const finish=()=>{
+   if(lc===null||rc===null)return;
+   if(lc===0&&rc===0)return resolve();
+   // Report both streams: a failing sink often says nothing while the source does.
+   const detail=[le.trim()&&`${source.command}: ${le.trim()}`,re.trim()&&`${sink.command}: ${re.trim()}`].filter(Boolean).join("; ")||"neither command wrote to stderr";
+   reject(new Error(`${source.command} | ${sink.command} failed (${source.command}=${lc}, ${sink.command}=${rc}): ${detail}`));
+  };
+  left.on("error",reject);right.on("error",reject);
+  left.on("close",c=>{lc=c;finish()});right.on("close",c=>{rc=c;finish()});
+ });
 }
 export async function pipeBuffer(buffer: Buffer, sink:{command:string;args:string[]}):Promise<void>{
  await new Promise<void>((resolve,reject)=>{const child=spawn(sink.command,sink.args,{stdio:["pipe","pipe","pipe"]});let stderr="";child.stderr.on("data",chunk=>stderr+=chunk);child.on("error",reject);child.on("close",code=>code===0?resolve():reject(new Error(`stream transfer failed (${code}): ${stderr}`)));child.stdin.end(buffer)});
