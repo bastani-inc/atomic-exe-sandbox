@@ -110,7 +110,7 @@ Requirements:
 
 ## Known limitations
 
-- **Team integrations are not supported.** VM creation attaches the GitHub integration by name, which exe.dev permits only for personal integrations; team integrations attach by tag instead. Create a personal integration for the repository.
+- **Agent status in herdr is reported once, not tracked.** Attaching reports the session identity and an initial `idle` state over herdr's socket API. Atomic does not emit lifecycle events, so a sandbox agent is not shown as `working` or `blocked` while it runs. This affects the herdr sidebar display only.
 - **Herdr does not recognise Atomic natively.** There is no `herdr integration install atomic` and no `agent start --kind atomic`, so herdr cannot resume Atomic sessions after a herdr server restart. Those panes return as plain shells in their saved directories.
 - **VM lifecycle paths are source-verified, not live-tested.** Provisioning, session control, attach, and the destroy guards are covered by unit tests, source review, and local herdr probes. Exercising them end to end requires a provisioned exe.dev VM.
 

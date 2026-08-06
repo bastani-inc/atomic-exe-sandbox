@@ -86,3 +86,41 @@ describe("transfer notice rendering",()=>{
  test("pads short text before colouring it",()=>{const line=component.render(100)[1];expect(line).toContain(first.padEnd(98));expect(strip(line)).toBe(` ${first.padEnd(98)} `)})
  test("degenerate widths stay inside the viewport",()=>{for(const width of [0,1,2])for(const line of component.render(width))expect(strip(line).length).toBeLessThanOrEqual(Math.max(width,0))})
 })
+
+import { selectGithubIntegration, vmCreateArgs, type ExeIntegration } from "../src/exe.js";
+describe("exe.dev GitHub integration binding",()=>{
+ // Verbatim shape returned by `integrations list --json`, including the auto:all defaults.
+ const live:ExeIntegration[]=[
+  {name:"notify",type:"notify",attachments:["auto:all"],config:{}},
+  {name:"llm",type:"llm",attachments:["auto:all"],config:{}},
+  {name:"reflection",type:"reflection",attachments:["auto:all"],config:{}},
+  {name:"bastani-inc-atomic",type:"github",team:true,attachments:["tag:bastani-inc-atomic"],config:{repositories:["bastani-inc/atomic"]}},
+ ];
+ const personal:ExeIntegration[]=[{name:"blog",type:"github",attachments:["vm:other"],config:{repositories:["ghuser/blog"]}}];
+
+ test("resolves a team integration to its tag",()=>expect(selectGithubIntegration(live,"bastani-inc","atomic")).toEqual({name:"bastani-inc-atomic",team:true,tags:["bastani-inc-atomic"]}));
+ test("matches the repository case-insensitively",()=>expect(selectGithubIntegration(live,"BASTANI-INC","Atomic").name).toBe("bastani-inc-atomic"));
+ test("ignores non-github integrations",()=>expect(()=>selectGithubIntegration(live,"someone","unrelated")).toThrow("no exe.dev GitHub integration"));
+ test("rejects a team integration with no tag attachment",()=>expect(()=>selectGithubIntegration([{name:"orphan",type:"github",team:true,attachments:[],config:{repositories:["a/b"]}}],"a","b")).toThrow("attach only by tag"));
+
+ test("a team integration is bound by tag, never by --integration",()=>{
+  const args=vmCreateArgs("atomic-test",["atomic-sandbox"],{name:"bastani-inc-atomic",team:true,tags:["bastani-inc-atomic"]});
+  expect(args.some(a=>a.startsWith("--integration="))).toBe(false);
+  expect(args).toContain("--tag=bastani-inc-atomic");
+  expect(args).toContain("--tag=atomic-sandbox");
+ });
+ test("a personal integration is still bound by name",()=>{
+  const args=vmCreateArgs("atomic-test",["atomic-sandbox"],selectGithubIntegration(personal,"ghuser","blog"));
+  expect(args).toContain("--integration=blog");
+  expect(args).toContain("--tag=atomic-sandbox");
+  expect(args.some(a=>a==="--tag=")).toBe(false);
+ });
+ test("does not duplicate a tag the sandbox already carries",()=>{
+  const args=vmCreateArgs("atomic-test",["atomic-sandbox","shared"],{name:"x",team:true,tags:["shared"]});
+  expect(args.filter(a=>a==="--tag=shared")).toHaveLength(1);
+ });
+ test("keeps the discovery tag so the sandbox stays findable",()=>{
+  const args=vmCreateArgs("atomic-test",["atomic-sandbox"],{name:"x",team:true,tags:["other"]});
+  expect(args).toContain("--tag=atomic-sandbox");
+ });
+})

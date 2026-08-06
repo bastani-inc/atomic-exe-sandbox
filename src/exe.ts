@@ -18,11 +18,19 @@ export function vmScript(vm:string,script:string,args:string[]=[]):string {
   return String(result.stdout||"");
 }
 export function listVms():ExeVm[]{const parsed=JSON.parse(exe("ls","--json")) as {vms:ExeVm[]};return parsed.vms??[]}
-export function listIntegrations():Array<{name:string;type:string;config?:{repositories?:string[]}}>{return JSON.parse(exe("integrations","list","--json"))}
-export function githubIntegration(owner:string,repo:string):string{
- const wanted=`${owner}/${repo}`.toLowerCase();const found=listIntegrations().find(i=>i.type==="github"&&i.config?.repositories?.some(r=>r.toLowerCase()===wanted));
- if(!found)throw new Error(`no exe.dev GitHub integration grants access to ${owner}/${repo}`);return found.name;
+export interface ExeIntegration { name:string; type:string; team?:boolean; attachments?:string[]; config?:{repositories?:string[]} }
+/** How the repository's GitHub integration must be bound to a new VM. */
+export interface GithubIntegration { name:string; team:boolean; tags:string[] }
+export function listIntegrations():ExeIntegration[]{return JSON.parse(exe("integrations","list","--json"))}
+/** Pure selection step, split out from the network call so it can be unit tested. */
+export function selectGithubIntegration(integrations:ExeIntegration[],owner:string,repo:string):GithubIntegration{
+ const wanted=`${owner}/${repo}`.toLowerCase();const found=integrations.find(i=>i.type==="github"&&i.config?.repositories?.some(r=>r.toLowerCase()===wanted));
+ if(!found)throw new Error(`no exe.dev GitHub integration grants access to ${owner}/${repo}`);
+ const tags=(found.attachments??[]).filter(a=>a.startsWith("tag:")).map(a=>a.slice(4)).filter(Boolean);
+ if(found.team===true&&tags.length===0)throw new Error(`exe.dev team integration '${found.name}' is not attached to a tag; team integrations attach only by tag. Run: integrations attach ${found.name} tag:<name>`);
+ return{name:found.name,team:found.team===true,tags};
 }
+export function githubIntegration(owner:string,repo:string):GithubIntegration{return selectGithubIntegration(listIntegrations(),owner,repo)}
 export function readManifest(vm:ExeVm):DiscoveredSandbox{
  const result=vmSshAllowFailure(vm.vm_name,"sh","-lc",`set -eu; d=$HOME/.atomic-exe; f=$d/manifest.json; [ \"$(stat -c %U:%a \"$d\")\" = \"exedev:700\" ]; [ \"$(stat -c %U:%a \"$f\")\" = \"exedev:600\" ]; [ ! -L \"$d\" ] && [ ! -L \"$f\" ]; cat \"$f\"`);
  if(result.exitCode!==0)return{vm,health:"unreachable",detail:result.stderr.trim()||"manifest unavailable"};
@@ -31,9 +39,16 @@ export function readManifest(vm:ExeVm):DiscoveredSandbox{
 }
 export function discover():DiscoveredSandbox[]{return listVms().filter(vm=>vm.tags?.includes("atomic-sandbox")).map(readManifest)}
 export function findByIdentity(identity:string):DiscoveredSandbox|undefined{return discover().find(s=>s.manifest?.identity===identity)}
-export function createVm(vmName:string,tags:string[],integration:string):ExeVm{
- const args=["new",`--name=${vmName}`,"--no-email","--json",`--comment=atomic-exe-sandbox creating`, `--integration=${integration}`,...tags.map(t=>`--tag=${t}`)];
- const value=JSON.parse(exe(...args));return (value.vm??value) as ExeVm;
+/** Pure argument construction, split out from the network call so it can be unit tested. */
+export function vmCreateArgs(vmName:string,tags:string[],integration:GithubIntegration):string[]{
+ // exe.dev binds team integrations by tag only; --integration would request a vm: attachment,
+ // which exe.dev rejects for team integrations. Carry the integration's tags instead.
+ const merged=[...new Set([...tags,...(integration.team?integration.tags:[])])];
+ const attach=integration.team?[]:[`--integration=${integration.name}`];
+ return["new",`--name=${vmName}`,"--no-email","--json",`--comment=atomic-exe-sandbox creating`,...attach,...merged.map(t=>`--tag=${t}`)];
+}
+export function createVm(vmName:string,tags:string[],integration:GithubIntegration):ExeVm{
+ const value=JSON.parse(exe(...vmCreateArgs(vmName,tags,integration)));return (value.vm??value) as ExeVm;
 }
 export function deleteVm(vmName:string):void{exe("rm",vmName,"--json")}
 export function setComment(vmName:string,text:string):void{exe("comment",vmName,text,"--json")}

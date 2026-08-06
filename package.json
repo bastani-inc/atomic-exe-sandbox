@@ -8,6 +8,6 @@
   "files": ["src", "README.md", "LICENSE"],
   "atomic": { "extensions": ["src/index.ts"] },
   "scripts": { "check": "tsc --noEmit", "test": "bun test" },
-  "peerDependencies": { "@bastani/atomic": "*" },
+  "peerDependencies": { "@bastani/atomic": ">=0.9.12" },
   "devDependencies": { "@bastani/atomic": "^0.9.12", "@types/bun": "latest", "@types/node": "latest", "typescript": "^5.9.3" }
 }
