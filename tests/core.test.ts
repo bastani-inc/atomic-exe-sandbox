@@ -172,3 +172,33 @@ describe("a new VM is not usable the moment exe.dev returns",()=>{
  test("the wait is bounded and reports the last error",()=>{expect(EXE_SOURCE).toContain("did not present a shell within");expect(EXE_SOURCE).toContain("timeoutMs=180_000")});
  test("a lobby answer produces an actionable message naming the billable VM",()=>{expect(EXE_SOURCE).toContain("sawLobby");expect(EXE_SOURCE).toContain("exists and is billable");expect(EXE_SOURCE).toContain("exe.dev rm ${vm}")});
 })
+
+import { rememberSshDest, vmHost, vmSshArgs, SSH_BASE } from "../src/exe.js";
+const CONFIG_SOURCE=readFileSync(new URL("../src/config.ts",import.meta.url),"utf8");
+const PROCESS_SOURCE=readFileSync(new URL("../src/process.ts",import.meta.url),"utf8");
+describe("VM SSH destinations come from exe.dev",()=>{
+ test("falls back to the constructed hostname when exe.dev said nothing",()=>expect(vmHost("never-seen")).toBe("never-seen.exe.xyz"));
+ test("prefers the ssh_dest exe.dev returned",()=>{rememberSshDest({vm_name:"vm-a",ssh_dest:"vm-a.shard7.exe.xyz"});expect(vmHost("vm-a")).toBe("vm-a.shard7.exe.xyz")});
+ test("accepts a user-qualified destination",()=>{rememberSshDest({vm_name:"vm-b",ssh_dest:"exedev@vm-b.exe.xyz"});expect(vmHost("vm-b")).toBe("exedev@vm-b.exe.xyz")});
+ test("ignores a destination carrying a port or metacharacters",()=>{for(const bad of ["vm-c.exe.xyz:2222","vm-c.exe.xyz he","-oProxyCommand=x","' ; rm -rf /"]){rememberSshDest({vm_name:"vm-c",ssh_dest:bad});expect(vmHost("vm-c")).toBe("vm-c.exe.xyz")}});
+ test("ignores a non-string destination",()=>{rememberSshDest({vm_name:"vm-d",ssh_dest:undefined});expect(vmHost("vm-d")).toBe("vm-d.exe.xyz")});
+
+ test("every VM connection keeps host-key pinning and the shared timeouts",()=>{
+  const args=vmSshArgs("vm-e");
+  expect(args).toEqual([...SSH_BASE,"-o","HostKeyAlias=exe.dev","vm-e.exe.xyz"]);
+  expect(args).toContain("BatchMode=yes");expect(args).toContain("ConnectTimeout=10");
+ });
+ test("the config transfer uses the shared prefix instead of building its own",()=>{
+  expect(CONFIG_SOURCE).toContain("...vmSshArgs(vm)");
+  expect(CONFIG_SOURCE).not.toContain("BatchMode=yes");
+  expect(CONFIG_SOURCE).not.toContain(".exe.xyz");
+ });
+ test("exe.dev responses populate the destination cache",()=>{expect(EXE_SOURCE).toContain("for(const vm of vms)rememberSshDest(vm)");expect(EXE_SOURCE).toContain("rememberSshDest(vm);return vm")});
+})
+describe("a piped transfer explains its own failure",()=>{
+ test("reports both exit codes, named by command",()=>expect(PROCESS_SOURCE).toContain("${source.command}=${lc}, ${sink.command}=${rc}"));
+ test("reports both stderr streams, not whichever is truthy first",()=>{expect(PROCESS_SOURCE).toContain('filter(Boolean).join("; ")');expect(PROCESS_SOURCE).not.toContain("${le||re}")});
+ test("says so explicitly when neither side spoke",()=>expect(PROCESS_SOURCE).toContain("neither command wrote to stderr"));
+ test("swallows the EPIPE that a dead sink causes",()=>expect(PROCESS_SOURCE).toContain('right.stdin.on("error",()=>{})'));
+ test("no longer hardcodes tar and ssh in the message",()=>expect(PROCESS_SOURCE).not.toContain("config transfer failed (tar="));
+})
