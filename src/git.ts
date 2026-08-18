@@ -106,12 +106,86 @@ function publishOrTrackNewBranch(
 	return `${remoteName}/${branch}`;
 }
 
+export interface WorktreeStatus {
+	staged: string[];
+	unstaged: string[];
+	untracked: string[];
+	unmerged: string[];
+}
+
+function unquotePath(value: string): string {
+	const trimmed = value.trim();
+	if (trimmed.length < 2 || !trimmed.startsWith('"') || !trimmed.endsWith('"'))
+		return trimmed;
+	return trimmed
+		.slice(1, -1)
+		.replace(/\\([nrt"\\])/g, (_match, char: string) => {
+			if (char === "n") return "\n";
+			if (char === "r") return "\r";
+			if (char === "t") return "\t";
+			return char;
+		});
+}
+
+function pathFromFields(line: string, prefix: string, fieldCount: number): string {
+	const rest = line.slice(prefix.length);
+	const parts = rest.split(" ");
+	if (parts.length <= fieldCount) return unquotePath(rest);
+	return unquotePath(parts.slice(fieldCount).join(" ").split("\t")[0] ?? rest);
+}
+
+/**
+ * Parse `git status --porcelain=v2` into staged, unstaged, untracked, and
+ * unmerged paths. A path can appear in more than one list (for example MM).
+ */
+export function parseWorktreeStatus(porcelain: string): WorktreeStatus {
+	const staged: string[] = [];
+	const unstaged: string[] = [];
+	const untracked: string[] = [];
+	const unmerged: string[] = [];
+	for (const line of porcelain.split("\n")) {
+		if (!line) continue;
+		if (line.startsWith("? ")) {
+			untracked.push(unquotePath(line.slice(2)));
+			continue;
+		}
+		if (line.startsWith("u ")) {
+			const xy = line.slice(2, 4);
+			const path = pathFromFields(line, "u ", 9);
+			unmerged.push(path);
+			if (xy[0] && xy[0] !== ".") staged.push(path);
+			if (xy[1] && xy[1] !== ".") unstaged.push(path);
+			continue;
+		}
+		if (line.startsWith("1 ") || line.startsWith("2 ")) {
+			const kind = line[0];
+			const xy = line.slice(2, 4);
+			const path = pathFromFields(line, `${kind} `, kind === "2" ? 9 : 8);
+			if (xy[0] && xy[0] !== ".") staged.push(path);
+			if (xy[1] && xy[1] !== ".") unstaged.push(path);
+		}
+	}
+	return { staged, unstaged, untracked, unmerged };
+}
+
+export function inspectWorktree(cwd: string): WorktreeStatus {
+	const root = git(cwd, "rev-parse", "--show-toplevel");
+	return parseWorktreeStatus(
+		git(root, "status", "--porcelain=v2", "--untracked-files=all"),
+	);
+}
+
+export function isDirtyWorktree(status: WorktreeStatus): boolean {
+	return (
+		status.staged.length > 0 ||
+		status.unstaged.length > 0 ||
+		status.untracked.length > 0 ||
+		status.unmerged.length > 0
+	);
+}
+
 export function inspectPublishedGit(cwd: string): GitContext {
 	const context = baseIdentity(cwd);
-	if (git(context.root, "status", "--porcelain=v2", "--untracked-files=all"))
-		throw new Error(
-			"worktree has tracked, staged, or untracked changes; commit before entering the sandbox",
-		);
 	const upstream = context.upstream ?? publishOrTrackNewBranch(context);
 	const remoteName = upstream.split("/")[0],
 		remote = git(context.root, "remote", "get-url", remoteName);

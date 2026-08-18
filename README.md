@@ -28,7 +28,7 @@ or, from local Atomic:
 
 Both guarantee the sandbox exists, creating it when necessary, recover the last numbered Atomic session if herdr or Atomic stopped, and attach to it. `/sandbox <id>` enters a specific session. There is intentionally no `connect` subcommand.
 
-Creation fails closed unless the local branch is named, clean, and exactly equal to its published GitHub upstream. Code is cloned only through `github.int.exe.xyz`; local source code is never copied.
+Creation fails closed unless the local branch is named and exactly equal to its published GitHub upstream. A dirty worktree — staged, unstaged, or untracked paths — warns first and asks whether to continue; local source is never copied. Code is cloned only through `github.int.exe.xyz`.
 
 The attached exe.dev GitHub integration also authenticates the GitHub CLI without placing a token in the VM. Remote Atomic processes, child shells, and subagents receive `GH_HOST=github.int.exe.xyz`, so repository-scoped commands work natively:
 

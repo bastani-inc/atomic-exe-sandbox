@@ -30,6 +30,7 @@ import {
 	showProgress,
 	STOPPED,
 } from "./ui.js";
+import { allowDirtyWorktree } from "./worktree.js";
 
 const MANIFEST_PATH = join(homedir(), ".atomic-exe", "manifest.json");
 const EXE_GITHUB_HOST = "github.int.exe.xyz";
@@ -154,6 +155,7 @@ async function localHandler(
 		paint = paintFor(ctx);
 	try {
 		if (!command || id !== undefined) {
+			if (!(await allowDirtyWorktree(ctx))) return;
 			await connectCurrent(ctx.cwd, ctx, id);
 			return;
 		}
@@ -166,11 +168,13 @@ async function localHandler(
 			return;
 		}
 		if (command === "create") {
+			if (!(await allowDirtyWorktree(ctx))) return;
 			const sandbox = await createSandbox(ctx.cwd, ctx);
 			await connect(sandbox, ctx);
 			return;
 		}
 		if (command === "transfer") {
+			if (!(await allowDirtyWorktree(ctx))) return;
 			await transferCurrentSession(ctx);
 			return;
 		}
@@ -419,6 +423,13 @@ export default function (atomic: ExtensionAPI) {
 	atomic.on("session_start", async (event, ctx) => {
 		if (event.reason !== "startup" || atomic.getFlag("sandbox") !== true) return;
 		try {
+			if (!(await allowDirtyWorktree(ctx))) {
+				ctx.ui.notify(
+					"Sandbox auto-connect skipped: local work will not be in the VM.",
+					"warning",
+				);
+				return;
+			}
 			await connectCurrent(ctx.cwd, ctx);
 		} catch (error) {
 			ctx.ui.notify(

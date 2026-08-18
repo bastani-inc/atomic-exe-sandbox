@@ -374,3 +374,191 @@ describe("the Working indicator is taken down without a keystroke",()=>{
   expect(INDEX_SOURCE.match(/repaintAfterCommand\(ctx\);/g)?.length).toBe(2);
  });
 })
+
+import { isDirtyWorktree, parseWorktreeStatus } from "../src/git.js";
+import {
+	confirmDirtyWorktree,
+	dirtyWorktreeDialog,
+	worktreeWarningCopy,
+} from "../src/worktree.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+const ACTIVE_ROW_MARKER = "\u001B_atomic:active\u0007";
+
+const ordinary = (xy: string, path: string) =>
+	`1 ${xy} N... 100644 100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} ${"c".repeat(40)} ${path}`;
+
+describe("a dirty worktree warns instead of failing closed", () => {
+	test("classifies staged, unstaged, untracked, and unmerged paths", () => {
+		const status = parseWorktreeStatus(
+			[
+				ordinary("M.", "src/staged.ts"),
+				ordinary(".M", "src/unstaged.ts"),
+				ordinary("MM", "src/both.ts"),
+				"? new.ts",
+				`2 R. N... 100644 100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} ${"c".repeat(40)} R100 renamed.ts\told.ts`,
+				`u UU N... 100644 100644 100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} ${"c".repeat(40)} src/conflict.ts`,
+			].join("\n"),
+		);
+		expect(status.staged).toEqual(["src/staged.ts", "src/both.ts", "renamed.ts", "src/conflict.ts"]);
+		expect(status.unstaged).toEqual(["src/unstaged.ts", "src/both.ts", "src/conflict.ts"]);
+		expect(status.untracked).toEqual(["new.ts"]);
+		expect(status.unmerged).toEqual(["src/conflict.ts"]);
+		expect(isDirtyWorktree(status)).toBe(true);
+	});
+	test("a clean porcelain is not dirty", () => {
+		expect(isDirtyWorktree(parseWorktreeStatus(""))).toBe(false);
+		expect(isDirtyWorktree(parseWorktreeStatus("\n"))).toBe(false);
+	});
+	test("unquotes C-style paths", () => {
+		expect(parseWorktreeStatus('? "file with space.ts"').untracked).toEqual([
+			"file with space.ts",
+		]);
+	});
+	test("the warning names what is dirty and that it will not be copied", () => {
+		const copy = worktreeWarningCopy({
+			staged: ["a.ts"],
+			unstaged: ["b.ts", "c.ts"],
+			untracked: ["d.ts"],
+			unmerged: [],
+		});
+		expect(copy.title).toBe("Local work stays here");
+		expect(copy.summary).toBe(
+			"This branch has 1 staged path, 2 unstaged paths, and 1 untracked path.",
+		);
+		expect(copy.consequence).toContain("None of this local work is copied");
+		expect(copy.stayLabel).toBe("Stay here");
+		expect(copy.proceedLabel).toBe("Enter sandbox");
+		expect(copy.samples).toEqual(["a.ts", "b.ts", "c.ts", "d.ts"]);
+	});
+	test("long dirty lists keep four sample paths and a remainder", () => {
+		const copy = worktreeWarningCopy({
+			staged: ["a", "b", "c", "d", "e"],
+			unstaged: [],
+			untracked: [],
+			unmerged: [],
+		});
+		expect(copy.samples).toEqual(["a", "b", "c", "d", "and 1 more"]);
+	});
+	test("inspectPublishedGit no longer refuses a dirty worktree", () => {
+		const git = readFileSync(new URL("../src/git.ts", import.meta.url), "utf8");
+		expect(git).toContain("export function parseWorktreeStatus");
+		expect(git).not.toContain("commit before entering the sandbox");
+	});
+	test("slash sandbox asks before entering, creating, transferring, or auto-connecting", () => {
+		expect(INDEX_SOURCE.match(/allowDirtyWorktree\(ctx\)/g)?.length).toBe(4);
+		expect(INDEX_SOURCE).toContain("if (!(await allowDirtyWorktree(ctx))) return;");
+		expect(INDEX_SOURCE).toContain("Sandbox auto-connect skipped");
+	});
+	test("doctor treats leftover local work as an advisory", () => {
+		const doctor = readFileSync(new URL("../src/doctor.ts", import.meta.url), "utf8");
+		expect(doctor).toContain("inspectWorktree(cwd)");
+		expect(doctor).toContain("warn: dirty");
+		expect(doctor).toContain("local work will not be cloned");
+	});
+});
+
+describe("the dirty worktree dialog is a reserved pi-tui overlay", () => {
+	const status = {
+		staged: ["src/a.ts"],
+		unstaged: ["src/b.ts"],
+		untracked: ["scratch.md"],
+		unmerged: [],
+	};
+	const theme = {
+		fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+		bold: (text: string) => `*${text}*`,
+	};
+	const keybindings = {
+		getKeys: (id: string) =>
+			(
+				{
+					"tui.select.up": ["up"],
+					"tui.select.down": ["down"],
+					"tui.select.confirm": ["enter"],
+					"tui.select.cancel": ["escape", "ctrl+c"],
+				} as Record<string, string[]>
+			)[id] ?? [],
+	};
+	const tui = { requestRender() {} };
+	const dialog = () =>
+		dirtyWorktreeDialog(
+			status,
+			tui as never,
+			theme as never,
+			keybindings as never,
+			() => {},
+		);
+
+	test("every line stays inside the viewport, including a degenerate width", () => {
+		const component = dialog();
+		for (const width of [0, 1, 2, 40, 60, 80]) {
+			for (const line of component.render(width)) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(Math.max(width, 1));
+			}
+		}
+	});
+	test("the heading is a warning, and the selected row carries the overlay mark", () => {
+		const lines = dialog().render(80);
+		const frame = lines.join(" ").replace(/\s+/g, " ");
+		expect(frame).toContain("<warning>*Local work stays here*</warning>");
+		expect(frame).toContain("None of this local work is copied");
+		expect(frame).toContain("Stay here");
+		expect(frame).toContain("Enter sandbox");
+		const marked = lines.filter((line) => line.includes(ACTIVE_ROW_MARKER));
+		expect(marked).toHaveLength(1);
+		expect(marked[0]).toContain("Stay here");
+	});
+	test("without a UI the old fail-closed error remains", async () => {
+		await expect(
+			confirmDirtyWorktree(
+				{ hasUI: false } as unknown as ExtensionContext,
+				status,
+			),
+		).rejects.toThrow("commit before entering the sandbox");
+	});
+	test("tui mode mounts a reserved bottom overlay", async () => {
+		let options: { overlay?: boolean; reserveTranscriptRows?: boolean; handlesCtrlC?: boolean } | undefined;
+		const ok = await confirmDirtyWorktree(
+			{
+				hasUI: true,
+				mode: "tui",
+				ui: {
+					custom: async (_factory: unknown, opts: typeof options) => {
+						options = opts;
+						return false;
+					},
+				},
+			} as unknown as ExtensionContext,
+			status,
+		);
+		expect(ok).toBe(false);
+		expect(options).toMatchObject({
+			overlay: true,
+			reserveTranscriptRows: true,
+			handlesCtrlC: true,
+		});
+	});
+	test("non-tui UI falls back to confirm with the same warning copy", async () => {
+		const copy = worktreeWarningCopy(status);
+		let title = "";
+		let message = "";
+		const ok = await confirmDirtyWorktree(
+			{
+				hasUI: true,
+				mode: "rpc",
+				ui: {
+					confirm: async (givenTitle: string, givenMessage: string) => {
+						title = givenTitle;
+						message = givenMessage;
+						return true;
+					},
+				},
+			} as unknown as ExtensionContext,
+			status,
+		);
+		expect(ok).toBe(true);
+		expect(title).toBe(copy.confirmTitle);
+		expect(message).toBe(copy.confirmMessage);
+	});
+});

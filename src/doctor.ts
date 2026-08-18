@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { accountFingerprint, discover, githubIntegration, listVms } from "./exe.js";
-import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
+import {
+	inspectGitIdentity,
+	inspectPublishedGit,
+	inspectWorktree,
+	isDirtyWorktree,
+} from "./git.js";
 import { identityForGit } from "./identity.js";
 import { runAllowFailure } from "./process.js";
 import { claimMatches } from "./sandbox.js";
@@ -134,9 +139,14 @@ export function runDoctor(cwd: string): Check[] {
 	checks.push(
 		check("published branch", () => {
 			const git = inspectPublishedGit(cwd);
+			const work = inspectWorktree(cwd);
+			const dirty = isDirtyWorktree(work);
 			return {
 				ok: true,
-				detail: `${git.owner}/${git.repo}:${git.branch} at ${git.commit.slice(0, 8)} matches its upstream`,
+				warn: dirty,
+				detail: dirty
+					? `${git.owner}/${git.repo}:${git.branch} matches its upstream; local work will not be cloned`
+					: `${git.owner}/${git.repo}:${git.branch} at ${git.commit.slice(0, 8)} matches its upstream`,
 			};
 		}),
 	);

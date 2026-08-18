@@ -6,12 +6,14 @@
       "name": "atomic-exe-sandbox",
       "devDependencies": {
         "@bastani/atomic": "^0.9.12",
+        "@earendil-works/pi-tui": "^0.83.0",
         "@types/bun": "latest",
         "@types/node": "latest",
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@bastani/atomic": "*",
+        "@bastani/atomic": ">=0.9.12",
+        "@earendil-works/pi-tui": ">=0.83.0",
       },
     },
   },

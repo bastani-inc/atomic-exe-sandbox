@@ -8,6 +8,15 @@
   "files": ["src", "README.md", "LICENSE"],
   "atomic": { "extensions": ["src/index.ts"] },
   "scripts": { "check": "tsc --noEmit", "test": "bun test" },
-  "peerDependencies": { "@bastani/atomic": ">=0.9.12" },
-  "devDependencies": { "@bastani/atomic": "^0.9.12", "@types/bun": "latest", "@types/node": "latest", "typescript": "^5.9.3" }
+  "peerDependencies": {
+    "@bastani/atomic": ">=0.9.12",
+    "@earendil-works/pi-tui": ">=0.83.0"
+  },
+  "devDependencies": {
+    "@bastani/atomic": "^0.9.12",
+    "@earendil-works/pi-tui": "^0.83.0",
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "^5.9.3"
+  }
 }
