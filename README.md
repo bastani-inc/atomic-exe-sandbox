@@ -90,7 +90,7 @@ If SSH drops or a terminal closes, herdr keeps every Atomic process running. Rec
 
 Provisioning installs herdr with `curl -fsSL https://herdr.dev/install.sh | sh`, which drops the binary in `$HOME/.local/bin`, and every remote script puts that directory on `PATH`. A detached herdr server owns the `atomic-exe` session; sessions are created with `herdr workspace create` and `herdr tab create`, started with `herdr pane run`, and switched with `herdr tab focus`.
 
-The exe.dev image ships other coding agents but not Atomic, so provisioning installs it with `bun install -g @bastani/atomic`, which links the binary into `$HOME/.bun/bin`. Provisioning then refuses to finish unless `atomic` is on `PATH` and runs, and starting a session refuses for the same reason, so a sandbox never comes up with a missing agent.
+The exe.dev image ships other coding agents but not Atomic, so provisioning installs the same version as the host (`atomic --version`) with `bun install -g @bastani/atomic@<host>`. It refuses to finish unless that exact version is on `PATH` and runs. Starting a session also refuses if `atomic` is missing.
 
 Herdr object ids are opaque. They are read out of the JSON that herdr prints when it creates an object, never predicted, and stored per session in the registry. Rows written before herdr simply have no ids and get new objects on their next start.
 

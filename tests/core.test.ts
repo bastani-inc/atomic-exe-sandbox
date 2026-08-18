@@ -68,8 +68,9 @@ describe("herdr multiplexer control script",()=>{
 describe("remote provisioning and lifecycle guards",()=>{
  test("provisioning installs herdr",()=>expect(REMOTE_SOURCE).toContain("curl -fsSL https://herdr.dev/install.sh | sh"))
  test("provisioning puts the herdr install dir on PATH",()=>expect(REMOTE_SOURCE).toContain(`export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"`))
- test("provisioning installs the atomic agent, which the exe.dev image does not ship",()=>{expect(REMOTE_SOURCE).toContain(`  "$HOME/.bun/bin/bun" install -g @bastani/atomic`);expect(REMOTE_SOURCE.indexOf("install -g @bastani/atomic")).toBeGreaterThan(REMOTE_SOURCE.indexOf("apt-get install -y -qq nodejs"))})
- test("provisioning refuses to finish without a working atomic binary",()=>{expect(REMOTE_SOURCE).toContain("command -v atomic >/dev/null 2>&1 || { echo 'Atomic agent install failed: no atomic binary on PATH (looked in $HOME/.local/bin and $HOME/.bun/bin)' >&2; exit 1; }");expect(REMOTE_SOURCE).toContain("atomic --version >/dev/null 2>&1 || { echo 'Atomic agent is installed but not executable; check that node 20 or newer is on PATH' >&2; exit 1; }")})
+ test("provisioning installs the atomic agent, which the exe.dev image does not ship",()=>{expect(REMOTE_SOURCE).toContain(`"$HOME/.bun/bin/bun" install -g "@bastani/atomic@$wanted"`);expect(REMOTE_SOURCE.indexOf("install -g")).toBeGreaterThan(REMOTE_SOURCE.indexOf("apt-get install -y -qq nodejs"))})
+ test("provisioning pins Atomic to the host version",()=>{expect(REMOTE_SOURCE).toContain("hostAtomicVersion()");expect(REMOTE_SOURCE).toContain('[ "$installed" = "$wanted" ]')})
+ test("provisioning refuses to finish without a working atomic binary",()=>{expect(REMOTE_SOURCE).toContain("command -v atomic >/dev/null 2>&1 || { echo 'Atomic agent install failed: no atomic binary on PATH (looked in $HOME/.local/bin and $HOME/.bun/bin)' >&2; exit 1; }");expect(REMOTE_SOURCE).toContain("Atomic install is $installed, wanted $wanted")})
  test("the bun global bin directory that receives the atomic binary is on PATH everywhere",()=>{expect(REMOTE_SOURCE).toContain(`export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"`);expect(SESSIONCTL).toContain(`export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"`)})
  test("starting a session refuses when atomic is missing",()=>expect(SESSIONCTL).toContain(`command -v atomic >/dev/null 2>&1 || { echo 'atomic is not installed in this sandbox: expected the agent on PATH ($HOME/.local/bin or $HOME/.bun/bin)' >&2; exit 1; }`))
  test("destroy and clean refuse to run while a client holds the attach lease",()=>{expect(REMOTE_SOURCE).toContain("flock -n -x 8 || { echo 'Atomic sandbox has attached clients' >&2; exit 1; }");expect(REMOTE_SOURCE.match(/\$\{ATTACH_GUARD\}/g)?.length).toBe(2)})
@@ -83,6 +84,14 @@ describe("remote provisioning and lifecycle guards",()=>{
   expect(SANDBOX_SOURCE).not.toContain(`"--remote"`);
   expect(SANDBOX_SOURCE).not.toContain("tui.stop()");
  });
+})
+
+import { hostAtomicVersion, parseAtomicVersion } from "../src/remote.js";
+describe("the VM Atomic version is the host Atomic version",()=>{
+ test("accepts a plain semver and a prerelease",()=>{expect(parseAtomicVersion("0.9.14-alpha.3\n")).toBe("0.9.14-alpha.3");expect(parseAtomicVersion("0.9.12")).toBe("0.9.12")})
+ test("rejects junk so it cannot become an npm tag",()=>{for(const raw of ["","latest","@bastani/atomic","0.9","not a version"])expect(()=>parseAtomicVersion(raw)).toThrow("host Atomic version")})
+ test("reads atomic --version from PATH",()=>{const version=hostAtomicVersion((_c,args)=>{expect(args).toEqual(["--version"]);return{status:0,stdout:"0.9.14-alpha.3\n"}});expect(version).toBe("0.9.14-alpha.3")})
+ test("fails closed when atomic is missing",()=>expect(()=>hostAtomicVersion(()=>({status:127,stderr:"not found"}))).toThrow("atomic --version"))
 })
 
 import { noticeComponent } from "../src/index.js";

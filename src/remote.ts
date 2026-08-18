@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { spawnSync } from "node:child_process";
 import type { LocalPackage } from "./config.js";
 import { vmScript, vmSsh } from "./exe.js";
 import type { GitContext, SandboxIdentity, SandboxManifest } from "./types.js";
@@ -27,6 +28,39 @@ flock -n -x 8 || { echo 'Atomic sandbox has attached clients' >&2; exit 1; }`;
 function encoded(value: unknown): string {
 	return Buffer.from(JSON.stringify(value)).toString("base64");
 }
+
+const ATOMIC_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+export function parseAtomicVersion(raw: string): string {
+	const version = raw.trim().split(/\s+/)[0] ?? "";
+	if (!ATOMIC_VERSION.test(version))
+		throw new Error(
+			`could not read the host Atomic version from: ${raw.trim().slice(0, 80) || "(empty)"}`,
+		);
+	return version;
+}
+
+/** The Atomic on PATH here. The VM is pinned to this exact npm version. */
+export function hostAtomicVersion(
+	run: (
+		command: string,
+		args: string[],
+	) => { status: number | null; stdout?: string; stderr?: string } = (
+		command,
+		args,
+	) => {
+		const result = spawnSync(command, args, { encoding: "utf8" });
+		return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+	},
+): string {
+	const result = run("atomic", ["--version"]);
+	if (result.status !== 0)
+		throw new Error(
+			`could not run host atomic --version: ${(result.stderr || result.stdout || "").trim() || `exit ${result.status}`}`,
+		);
+	return parseAtomicVersion(result.stdout ?? "");
+}
+
 
 export function initialManifest(
 	git: GitContext,
@@ -106,7 +140,7 @@ export function finalize(
 		vm,
 		`set -euo pipefail
 umask 077
-mapping_b64=$1; checkout=$2; updated_at=$3
+mapping_b64=$1; checkout=$2; updated_at=$3; wanted=$4
 root=$HOME/.atomic-exe; stage=$root/config-stage; agent=$HOME/.atomic/agent
 ${REMOTE_PATH}
 if [ ! -x "$HOME/.bun/bin/bun" ]; then
@@ -123,11 +157,13 @@ fi
 # The exe.dev image ships other agents but not Atomic, so install it here. 'bun install -g'
 # links the binary into $HOME/.bun/bin, which the remote scripts and SESSIONCTL both put
 # on PATH, and the shim runs through node, so this has to follow the node install above.
-if ! command -v atomic >/dev/null 2>&1; then
-  "$HOME/.bun/bin/bun" install -g @bastani/atomic
+# Pin to the host Atomic so isolated-engine APIs and this extension stay in lockstep.
+if ! command -v atomic >/dev/null 2>&1 || [ "$(atomic --version 2>/dev/null || true)" != "$wanted" ]; then
+  "$HOME/.bun/bin/bun" install -g "@bastani/atomic@$wanted"
 fi
 command -v atomic >/dev/null 2>&1 || { echo 'Atomic agent install failed: no atomic binary on PATH (looked in $HOME/.local/bin and $HOME/.bun/bin)' >&2; exit 1; }
-atomic --version >/dev/null 2>&1 || { echo 'Atomic agent is installed but not executable; check that node 20 or newer is on PATH' >&2; exit 1; }
+installed=$(atomic --version 2>/dev/null || true)
+[ "$installed" = "$wanted" ] || { echo "Atomic install is $installed, wanted $wanted" >&2; exit 1; }
 install -d -m 700 "$agent"
 # Preserve exe.dev's managed-LLM extension even if local config has a collision.
 vendor_backup=$root/exe-dev-vendor
@@ -181,7 +217,7 @@ os.chmod(p,0o600)
 PY
 rm -rf "$stage"
 `,
-		[encoded(mapping), manifest.checkoutPath, new Date().toISOString()],
+		[encoded(mapping), manifest.checkoutPath, new Date().toISOString(), hostAtomicVersion()],
 	);
 }
 
