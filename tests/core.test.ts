@@ -30,8 +30,10 @@ describe("herdr object ids in the registry",()=>{
  test("accepts rows written before herdr",()=>{const row=parseSession(legacy);expect(row.workspaceId).toBeUndefined();expect(row.tabId).toBeUndefined();expect(row.paneId).toBeUndefined()})
  test("accepts a registry of rows written before herdr",()=>expect(parseRegistry({version:1,nextId:2,lastId:1,sessions:{"1":legacy}}).sessions["1"].paneId).toBeUndefined())
  test("preserves opaque ids verbatim",()=>{const row=parseSession({...legacy,workspaceId:"w7",tabId:"w7:t3",paneId:"w7:p9"});expect(row.workspaceId).toBe("w7");expect(row.tabId).toBe("w7:t3");expect(row.paneId).toBe("w7:p9")})
+ test("preserves a node branch and worktree path",()=>{const row=parseSession({...legacy,branch:"atomic-node/auth",worktreePath:"/home/exedev/atomic-sandboxes/id/wt-2"});expect(row.branch).toBe("atomic-node/auth");expect(row.worktreePath).toBe("/home/exedev/atomic-sandboxes/id/wt-2")})
  test("rejects non-string ids",()=>expect(()=>parseSession({...legacy,paneId:3})).toThrow("paneId"))
  test("rejects empty ids",()=>expect(()=>parseSession({...legacy,tabId:""})).toThrow("tabId"))
+ test("rejects empty node branches",()=>expect(()=>parseSession({...legacy,branch:""})).toThrow("branch"))
  test("rejects invalid ids inside a registry",()=>expect(()=>parseRegistry({version:1,nextId:2,lastId:1,sessions:{"1":{...legacy,workspaceId:{}}}})).toThrow("workspaceId"))
 })
 
@@ -59,7 +61,8 @@ describe("herdr multiplexer control script",()=>{
  test("startup runs under the registry lock so concurrent ensures cannot duplicate a session",()=>{expect(SESSIONCTL).toContain(`    row=$(session_row "$id")\n    if ! session_alive "$row"; then\n      start_window "$row"\n      row=$(session_row "$id")\n    fi\n    flock -u 9`);expect(SESSIONCTL).toContain(`    start_window "$row"\n    row=$(session_row "$id")\n    flock -u 9`);expect(SESSIONCTL).not.toContain("\n  flock -x 9");expect(SESSIONCTL).not.toContain("\n  flock -u 9")})
  test("detach only signals a process that is still this session's herdr client",()=>{expect(SESSIONCTL).toContain("expected=['herdr','--session',session]");expect(SESSIONCTL).toContain("if len(parts)!=2 or parts[0]!=name or not parts[1].isdigit() or parts[1]!=start or argv!=expected:");expect(SESSIONCTL).toContain("os.kill(int(name),signal.SIGTERM)");expect(SESSIONCTL).toContain("no attached sandbox clients to detach");expect(SESSIONCTL).not.toContain("grep -qa herdr")})
  test("keeps startup output after herdr destroys the pane",()=>{expect(SESSIONCTL).toContain(`log="$root/atomic-start-$id.log"; install -m 600 /dev/null "$log"`);expect(SESSIONCTL).toContain(`exec script -qefc \\"$agent\\" '$log'`);expect(SESSIONCTL.match(/tail -n 200 "\$log" >&2/g)?.length).toBe(2);expect(SESSIONCTL).not.toContain(">&2 2>/dev/null")})
- test("reuses a restored pane instead of leaving a duplicate tab",()=>{expect(SESSIONCTL).toContain(`  if [ -n "$pane" ] && herdr_cli pane get "$pane" >/dev/null 2>&1; then`);expect(SESSIONCTL).toContain(`command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=`);expect(SESSIONCTL).toContain(`    herdr_cli tab rename "$tab" "$id" >/dev/null\n    close_stale_tab "$stale_tab" "$tab"`);expect(SESSIONCTL).toContain("case \"$output\" in *tab_not_found*) return 0;; esac")})
+ test("reuses a restored pane instead of leaving a duplicate tab",()=>{expect(SESSIONCTL).toContain(`  if [ -n "$pane" ] && herdr_cli pane get "$pane" >/dev/null 2>&1; then`);expect(SESSIONCTL).toContain(`command="cd '$cwd'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=`);expect(SESSIONCTL).toContain(`    herdr_cli tab rename "$tab" "$id" >/dev/null\n    close_stale_tab "$stale_tab" "$tab"`);expect(SESSIONCTL).toContain("case \"$output\" in *tab_not_found*) return 0;; esac")})
+ test("a spawned node gets its own worktree and can be prompted",()=>{expect(SESSIONCTL).toContain("ensure_worktree");expect(SESSIONCTL).toContain("wt-$id");expect(SESSIONCTL).toContain("pane send-text");expect(SESSIONCTL).toContain("git('diff','HEAD')")})
  test("keeps every state path off the replaced multiplexer",()=>{for(const legacy of LEGACY_COMMANDS)expect(SESSIONCTL).not.toContain(legacy);expect(SESSIONCTL).toContain("$HOME/.local/bin")})
 })
 describe("remote provisioning and lifecycle guards",()=>{
@@ -71,7 +74,15 @@ describe("remote provisioning and lifecycle guards",()=>{
  test("starting a session refuses when atomic is missing",()=>expect(SESSIONCTL).toContain(`command -v atomic >/dev/null 2>&1 || { echo 'atomic is not installed in this sandbox: expected the agent on PATH ($HOME/.local/bin or $HOME/.bun/bin)' >&2; exit 1; }`))
  test("destroy and clean refuse to run while a client holds the attach lease",()=>{expect(REMOTE_SOURCE).toContain("flock -n -x 8 || { echo 'Atomic sandbox has attached clients' >&2; exit 1; }");expect(REMOTE_SOURCE.match(/\$\{ATTACH_GUARD\}/g)?.length).toBe(2)})
  test("destroy stops the herdr session instead of the replaced multiplexer",()=>{expect(REMOTE_SOURCE).toContain("herdr session stop ${HERDR_SESSION_NAME}");for(const legacy of LEGACY_COMMANDS)expect(REMOTE_SOURCE).not.toContain(legacy)})
- test("host key pinning survives in the attach path",()=>{const sandbox=readFileSync(new URL("../src/sandbox.ts",import.meta.url),"utf8");expect(sandbox).toContain("VM_HOST_KEY_ARGS");expect(sandbox).toContain("sessionctl attach");expect(sandbox).not.toContain(`"--remote"`)})
+ test("host key pinning survives in the attach path",()=>{
+  const attach=readFileSync(new URL("../src/attach.ts",import.meta.url),"utf8");
+  expect(attach).toContain("VM_HOST_KEY_ARGS");
+  expect(attach).toContain("sessionctl attach");
+  expect(attach).toContain("vmHost(vmName)");
+  expect(SANDBOX_SOURCE).toContain("attachToSession");
+  expect(SANDBOX_SOURCE).not.toContain(`"--remote"`);
+  expect(SANDBOX_SOURCE).not.toContain("tui.stop()");
+ });
 })
 
 import { noticeComponent } from "../src/index.js";
@@ -302,7 +313,7 @@ describe("doctor preflight",()=>{
  });
  test("a clean run says so",()=>expect(formatChecks([{name:"a",ok:true,detail:"fine"}])).toContain("All 1 checks passed."));
  test("passing checks do not print a fix",()=>expect(formatChecks([{name:"a",ok:true,detail:"fine",fix:"unused"}])).not.toContain("fix:"));
- test("the command is wired up and advertised",()=>{expect(INDEX_SOURCE).toContain('command === "doctor"');expect(INDEX_SOURCE).toContain("destroy [--force]|doctor")});
+ test("the command is wired up and advertised",()=>{expect(INDEX_SOURCE).toContain('command === "doctor"');expect(INDEX_SOURCE).toContain("destroy [--force]|doctor");expect(INDEX_SOURCE).toContain("prompt [id] <text>")});
 })
 
 import { formatSessions, type SessionStatus } from "../src/sessions.js";

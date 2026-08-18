@@ -26,7 +26,7 @@ or, from local Atomic:
 /sandbox
 ```
 
-Both guarantee the sandbox exists, creating it when necessary, recover the last numbered Atomic session if herdr or Atomic stopped, and attach to it. `/sandbox <id>` enters a specific session. There is intentionally no `connect` subcommand.
+Both guarantee the sandbox exists, creating it when necessary, recover the last numbered Atomic session if herdr or Atomic stopped, and attach to it. `/sandbox <id>` enters a specific session. There is intentionally no `connect` subcommand. From Atomic's isolated interactive TUI the attach cannot take this terminal: if you are already in herdr it opens a focused sibling tab; on Windows it opens Windows Terminal (then `cmd start`); otherwise it opens tmux / iTerm / Ghostty / Terminal.app.
 
 Creation fails closed unless the local branch is named and exactly equal to its published GitHub upstream. A dirty worktree — staged, unstaged, or untracked paths — warns first and asks whether to continue; local source is never copied. Code is cloned only through `github.int.exe.xyz`.
 
@@ -46,6 +46,7 @@ Authentication is injected at exe.dev's network edge and follows the integration
 /sandbox                 create/recover/enter the last session
 /sandbox <id>            recover/enter a numbered session
 /sandbox list            list all Atomic sessions in this branch sandbox
+/sandbox prompt <id> …   send text into that session as if you typed it
 /sandbox transfer        continue the current local Atomic session in the sandbox
 /sandbox create          explicitly create the sandbox
 /sandbox clean           clear regenerable caches; preserve sessions and Git
@@ -55,7 +56,21 @@ Authentication is injected at exe.dev's network edge and follows the integration
 
 `transfer` requires the local Atomic to be idle. It creates the VM if absent, reserves the next session number, streams the current JSONL, changes only the header `cwd`, starts that session remotely, leaves a visible custom marker in the local JSONL that is excluded from model context, connects, and closes the originating local Atomic after detach. The local JSONL remains as a backup.
 
+The local session also registers a `sandbox` tool so a host model or workflow can allocate **nodes**. A node is one remote Atomic session with its own git worktree/branch, so each workflow has its own tool queue:
+
+```text
+sandbox { action: spawn, label: "auth" }     # new session on atomic-node/auth
+sandbox { action: prompt, id: 2, text: "…" } # send a workflow or task
+sandbox { action: collect, id: 2 }           # git status / log / diff
+```
+
+Combine those branches later with `gh stack`. The tool does not take over this TUI.
+
 ## Remote Atomic commands
+
+On the VM's published checkout, `/sandbox` still manages sessions in *this* sandbox (`new`, `switch`, `detach`, `prompt`).
+
+Inside a **node** (a worktree on another branch), `/sandbox` is the host command again: it creates or enters **that branch's** exe.dev sandbox — a sandbox of this sandbox. `/sandbox prompt` then talks to that child VM. If the child has only one session, the id is optional.
 
 ```text
 /sandbox new             create the next numbered Atomic session and switch to it
@@ -64,6 +79,7 @@ Authentication is injected at exe.dev's network edge and follows the integration
 /sandbox list            list all numbered sessions
 /sandbox status          show brief sandbox identity
 /sandbox detach          disconnect while every Atomic session keeps running
+/sandbox prompt [id] …   send text into the only session, or a numbered one
 ```
 
 The powerline shows only `☁ sandbox #N` remotely. Local Atomic has no environment label.
@@ -110,6 +126,7 @@ Requirements:
 
 ## Known limitations
 
+- **Attach cannot take over Atomic's isolated-engine TUI.** `/sandbox` and `atomic --sandbox` run in the engine child, whose stdout is the JSONL transport, not a TTY. Stealing that pipe painted an empty screen. When the local Atomic is already inside herdr, attach opens a focused sibling tab and runs the host-key-pinned SSH command there. On Windows it opens a Windows Terminal tab, then a `cmd start` console. Otherwise it opens tmux / iTerm / Ghostty / Terminal.app. Detach in that tab with `/sandbox detach`. A Windows host still needs OpenSSH (`ssh`) on `PATH`.
 - **Agent status in herdr is reported once, not tracked.** Attaching reports the session identity and an initial `idle` state over herdr's socket API. Atomic does not emit lifecycle events, so a sandbox agent is not shown as `working` or `blocked` while it runs. This affects the herdr sidebar display only.
 - **Herdr does not recognise Atomic natively.** There is no `herdr integration install atomic` and no `agent start --kind atomic`, so herdr cannot resume Atomic sessions after a herdr server restart. Those panes return as plain shells in their saved directories.
 - **VM lifecycle paths are source-verified, not live-tested.** Provisioning, session control, attach, and the destroy guards are covered by unit tests, source review, and local herdr probes. Exercising them end to end requires a provisioned exe.dev VM.

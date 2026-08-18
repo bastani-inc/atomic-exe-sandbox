@@ -1,13 +1,13 @@
-import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 import type { ExtensionContext } from "@bastani/atomic";
+import { attachToSession, isolatedEngineAttach } from "./attach.js";
 import { formatTransferPlan, portableTransferPlan, transferPortableConfig, validatePortableConfig } from "./config.js";
-import { accountFingerprint, createVm, deleteVm, discover, githubIntegration, setComment, vmSshAllowFailure, waitForVmShell, VM_HOST_KEY_ARGS } from "./exe.js";
+import { accountFingerprint, createVm, deleteVm, discover, githubIntegration, setComment, vmSshAllowFailure, waitForVmShell } from "./exe.js";
 import { inspectGitIdentity, inspectPublishedGit } from "./git.js";
 import { generationTag, identityForGit, newGeneration, vmNameFor } from "./identity.js";
 import { startHerdrBridge } from "./herdr.js";
 import { bootstrapRepository, cleanSandbox, finalize, guardDestroy, initialManifest, markManifestError } from "./remote.js";
-import { ensureRemoteSession, initializeSessions, listRemoteSessions, type SandboxSession } from "./sessions.js";
+import { ensureRemoteSession, initializeSessions, listRemoteSessions } from "./sessions.js";
 import type { DiscoveredSandbox, GitContext, SandboxIdentity } from "./types.js";
 import { PASS, type Paint, paintFor, PLAIN_PAINT, clearProgress, showProgress } from "./ui.js";
 
@@ -88,10 +88,11 @@ export async function ensureSandbox(cwd:string,ctx:ExtensionContext,options:{sta
 export async function connectCurrent(cwd:string,ctx:ExtensionContext,id?:number):Promise<void>{const found=await ensureSandbox(cwd,ctx);await connect(found,ctx,id)}
 export async function connect(found:DiscoveredSandbox,ctx:ExtensionContext,id?:number):Promise<void>{
  if(found.health!=="ready"||!found.manifest)throw new Error(`sandbox is ${found.health}`);if(ctx.mode!=="tui")throw new Error("entering a sandbox requires Atomic TUI mode");
- const session:SandboxSession=ensureRemoteSession(found.vm.vm_name,id);
+ const session=ensureRemoteSession(found.vm.vm_name,id);
  const herdr=startHerdrBridge(session.id);
  if(herdr)vmSshAllowFailure(found.vm.vm_name,"rm","-f",herdr.remoteSocket);
- // The attach runs through sessionctl so the client holds the sandbox attach lease.
+ // Isolated Atomic cannot give SSH this TTY. A real terminal is opened instead.
  // Host-key checking stays pinned to exe.dev; herdr --remote would bypass it.
- await ctx.ui.custom<number|null>((tui,_theme,_kb,done)=>{let status:number|null=1;tui.stop();try{process.stdout.write("\x1b[2J\x1b[H");const forwarding=herdr?["-o","ExitOnForwardFailure=yes","-o","StreamLocalBindUnlink=yes","-R",`${herdr.remoteSocket}:${herdr.localSocket}`]:[];const result=spawnSync("ssh",[...VM_HOST_KEY_ARGS,...forwarding,"-tt",`${found.vm.vm_name}.exe.xyz`,`~/.atomic-exe/sessionctl report-herdr '${session.id}'; exec ~/.atomic-exe/sessionctl attach '${session.id}'`],{stdio:"inherit",env:process.env});status=result.status}catch(error){process.stderr.write(`${(error as Error).message}\n`)}finally{if(herdr)vmSshAllowFailure(found.vm.vm_name,"rm","-f",herdr.remoteSocket);herdr?.stop();tui.start();tui.requestRender(true);done(status)}return{render:()=>[],invalidate:()=>{}}});
+ try{await attachToSession(ctx,found.vm.vm_name,session.id,herdr)}
+ finally{if(!isolatedEngineAttach()&&herdr)vmSshAllowFailure(found.vm.vm_name,"rm","-f",herdr.remoteSocket)}
 }

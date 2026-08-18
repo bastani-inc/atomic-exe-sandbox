@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { VM_HOST_KEY_ARGS, vmScript, vmSsh } from "./exe.js";
 import { pipeBuffer } from "./process.js";
-import { HERDR_SESSION_NAME, type SandboxManifest } from "./types.js";
+import { CHECKOUT_ROOT, HERDR_SESSION_NAME, type SandboxManifest } from "./types.js";
 import {
 	type Paint,
 	PLAIN_PAINT,
@@ -19,6 +19,9 @@ export interface SandboxSession {
 	workspaceId?: string;
 	tabId?: string;
 	paneId?: string;
+	/** Published-branch worktree for this node. Absent when the session shares the main checkout. */
+	branch?: string;
+	worktreePath?: string;
 }
 
 export interface SessionStatus extends SandboxSession {
@@ -33,7 +36,7 @@ export interface SessionsRegistry {
 	sessions: Record<string, SandboxSession>;
 }
 
-const HERDR_ID_FIELDS = ["workspaceId", "tabId", "paneId"] as const;
+const HERDR_ID_FIELDS = ["workspaceId", "tabId", "paneId", "branch", "worktreePath"] as const;
 
 function decodeJson(value: string, label: string): unknown {
 	try {
@@ -148,6 +151,18 @@ if [ "$3" = true ]; then "/home/exedev/.atomic-exe/sessionctl" ensure 1 >/dev/nu
 	);
 }
 
+/** Replace sessionctl on a live VM so older sandboxes pick up node/worktree commands. */
+export function installSessionctl(vm: string): void {
+	vmScript(
+		vm,
+		`set -euo pipefail
+printf '%s' "$1" | base64 -d > /home/exedev/.atomic-exe/sessionctl
+chmod 700 /home/exedev/.atomic-exe/sessionctl
+`,
+		[Buffer.from(SESSIONCTL).toString("base64")],
+	);
+}
+
 export function ensureRemoteSession(
 	vm: string,
 	requestedId?: number,
@@ -161,9 +176,56 @@ export function ensureRemoteSession(
 	return parseSession(decodeJson(output.trim(), "remote sandbox session"));
 }
 
-export function createRemoteSession(vm: string): SandboxSession {
-	const output = vmSsh(vm, "/home/exedev/.atomic-exe/sessionctl", "new");
+export function createRemoteSession(vm: string, branch?: string): SandboxSession {
+	const output = vmSsh(
+		vm,
+		"/home/exedev/.atomic-exe/sessionctl",
+		"new",
+		branch ?? "",
+	);
 	return parseSession(decodeJson(output.trim(), "new sandbox session"));
+}
+
+export function promptRemoteSession(vm: string, id: number, text: string): void {
+	vmSsh(
+		vm,
+		"/home/exedev/.atomic-exe/sessionctl",
+		"prompt",
+		String(id),
+		Buffer.from(text).toString("base64"),
+	);
+}
+
+export function readRemoteSession(vm: string, id: number, lines = 80): string {
+	return vmSsh(
+		vm,
+		"/home/exedev/.atomic-exe/sessionctl",
+		"read",
+		String(id),
+		String(lines),
+	);
+}
+
+export function collectRemoteSession(
+	vm: string,
+	id: number,
+): { branch: string; cwd: string; status: string; log: string; diff: string } {
+	const value = decodeJson(
+		vmSsh(vm, "/home/exedev/.atomic-exe/sessionctl", "collect", String(id)),
+		"sandbox session collect",
+	);
+	if (!value || typeof value !== "object")
+		throw new Error("sandbox session collect is invalid");
+	const row = value as Record<string, unknown>;
+	const text = (key: string) =>
+		typeof row[key] === "string" ? (row[key] as string) : "";
+	return {
+		branch: text("branch"),
+		cwd: text("cwd"),
+		status: text("status"),
+		log: text("log"),
+		diff: text("diff"),
+	};
 }
 
 export function listRemoteSessions(vm: string): SessionStatus[] {
@@ -271,7 +333,8 @@ export function formatSessions(
 			const transferred = session.transferred
 				? paint.dim("  transferred")
 				: "";
-			return `${tint(`${glyph} #${session.id}`)}  ${tint(state)}${transferred}`;
+			const node = session.branch ? paint.dim(`  ${session.branch}`) : "";
+			return `${tint(`${glyph} #${session.id}`)}  ${tint(state)}${transferred}${node}`;
 		})
 		.join("\n");
 }
@@ -287,6 +350,8 @@ registry=$root/sessions.json
 manifest=$root/manifest.json
 session=${HERDR_SESSION_NAME}
 checkout=$(python3 -c 'import json,os; print(json.load(open(os.path.expanduser("~/.atomic-exe/manifest.json")))["checkoutPath"])')
+identity=$(python3 -c 'import json,os; print(json.load(open(os.path.expanduser("~/.atomic-exe/manifest.json")))["identity"])')
+published=$(python3 -c 'import json,os; print(json.load(open(os.path.expanduser("~/.atomic-exe/manifest.json")))["branch"])')
 install -d -m 700 "$root/clients"
 exec 9>"$root/sessions.lock"
 flock -x 9
@@ -404,17 +469,52 @@ close_stale_tab() {
   exit 1
 }
 
+ensure_worktree() {
+  local id=$1 branch=$2 wt
+  case "$branch" in ""|*..*|/*|*[[:space:]]*) echo "invalid branch name" >&2; exit 1;; esac
+  printf '%s' "$branch" | python3 -c 'import re,sys; b=sys.stdin.read(); sys.exit(0 if re.fullmatch(r"[A-Za-z0-9._/-]+", b) else 1)' || { echo "invalid branch name" >&2; exit 1; }
+  wt="${CHECKOUT_ROOT}/$identity/wt-$id"
+  if [ -e "$wt" ]; then
+    [ -d "$wt" ] || { echo "worktree path exists and is not a directory" >&2; exit 1; }
+    printf '%s' "$wt"
+    return 0
+  fi
+  git -C "$checkout" fetch --quiet origin
+  if git -C "$checkout" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$checkout" worktree add "$wt" "$branch"
+  elif git -C "$checkout" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$checkout" worktree add -b "$branch" "$wt" "origin/$branch"
+  else
+    git -C "$checkout" worktree add -b "$branch" "$wt" "origin/$published"
+  fi
+  printf '%s' "$wt"
+}
+
+persist_cwd() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json,os,sys
+p=os.path.expanduser('~/.atomic-exe/sessions.json'); d=json.load(open(p)); key=str(int(sys.argv[1])); item=d['sessions'].get(key)
+if not item: raise SystemExit(f'unknown sandbox session #{key}')
+item['worktreePath'],item['branch']=sys.argv[2],sys.argv[3]
+tmp=p+'.tmp.'+str(os.getpid())
+with open(tmp,'w') as f: json.dump(d,f,indent=2); f.write(chr(10))
+os.chmod(tmp,0o600); os.replace(tmp,p)
+PY
+}
+
 start_window() {
   # The exe.dev image does not ship Atomic; provisioning installs it. Fail with a clear
   # message instead of letting the pane die on 'atomic: command not found'.
   command -v atomic >/dev/null 2>&1 || { echo 'atomic is not installed in this sandbox: expected the agent on PATH ($HOME/.local/bin or $HOME/.bun/bin)' >&2; exit 1; }
-  local row=$1 id session_id session_path workspace tab pane created command agent log ready stale_tab
+  local row=$1 id session_id session_path workspace tab pane created command agent log ready stale_tab cwd
   row_field "$row" id; id=$REPLY
   row_field "$row" sessionId; session_id=$REPLY
   row_field "$row" sessionPath; session_path=$REPLY
   row_field "$row" workspaceId; workspace=$REPLY
   row_field "$row" tabId; tab=$REPLY
   row_field "$row" paneId; pane=$REPLY
+  row_field "$row" worktreePath; cwd=$REPLY
+  [ -n "$cwd" ] || cwd=$checkout
   ready="$root/ready-$id"; rm -f "$ready"
   # Herdr destroys a pane as soon as its process exits, taking the terminal output with
   # it, so Atomic runs under 'script' and startup diagnostics come from this log.
@@ -428,9 +528,9 @@ start_window() {
     stale_tab=$tab
     live_workspace; workspace=$REPLY
     if [ -n "$workspace" ]; then
-      created=$(herdr_cli tab create --workspace "$workspace" --cwd "$checkout" --label "$id" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
+      created=$(herdr_cli tab create --workspace "$workspace" --cwd "$cwd" --label "$id" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
     else
-      created=$(herdr_cli workspace create --cwd "$checkout" --label "$session" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
+      created=$(herdr_cli workspace create --cwd "$cwd" --label "$session" --no-focus --env "ATOMIC_EXE_SESSION_ID=$id" --env GH_HOST=github.int.exe.xyz --env COLORTERM=truecolor --env "ATOMIC_CODING_AGENT_DIR=$HOME/.atomic/agent")
     fi
     { IFS= read -r -d '' workspace; IFS= read -r -d '' tab; IFS= read -r -d '' pane; } < <(printf '%s' "$created" | herdr_ids)
     herdr_cli tab rename "$tab" "$id" >/dev/null
@@ -444,7 +544,7 @@ start_window() {
   fi
   # A restored pane keeps its cwd but loses the per-pane environment, so both paths set
   # the working directory and every variable explicitly.
-  command="cd '$checkout'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=\\"\\$HOME/.atomic/agent\\"; exec script -qefc \\"$agent\\" '$log'"
+  command="cd '$cwd'; export ATOMIC_EXE_SESSION_ID='$id' GH_HOST=github.int.exe.xyz COLORTERM=truecolor ATOMIC_CODING_AGENT_DIR=\\"\\$HOME/.atomic/agent\\"; exec script -qefc \\"$agent\\" '$log'"
   herdr_cli pane run "$pane" "$command" >/dev/null
   for _ in $(seq 1 60); do
     if marker_alive "$id"; then return 0; fi
@@ -494,10 +594,14 @@ PY
     printf '%s\\n' "$row"
     ;;
   new)
-    row=$(python3 - <<'PY'
-import json,os,uuid,datetime
-p=os.path.expanduser('~/.atomic-exe/sessions.json'); d=json.load(open(p)); id=int(d['nextId'])
+    branch=\${2:-}
+    row=$(python3 - "$branch" <<'PY'
+import json,os,re,uuid,datetime,sys
+p=os.path.expanduser('~/.atomic-exe/sessions.json'); d=json.load(open(p)); id=int(d['nextId']); branch=sys.argv[1]
+if branch and (not re.fullmatch(r'[A-Za-z0-9._/-]+', branch) or '..' in branch or branch.startswith('/')):
+ raise SystemExit('invalid branch name')
 item={'id':id,'sessionId':str(uuid.uuid4()),'createdAt':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+if branch: item['branch']=branch
 d['sessions'][str(id)]=item; d['nextId']=id+1; d['lastId']=id
 tmp=p+'.tmp.'+str(os.getpid())
 with open(tmp,'w') as f: json.dump(d,f,indent=2); f.write(chr(10))
@@ -506,6 +610,12 @@ print(json.dumps(item))
 PY
 )
     row_field "$row" id; id=$REPLY
+    row_field "$row" branch; branch=$REPLY
+    if [ -n "$branch" ]; then
+      wt=$(ensure_worktree "$id" "$branch")
+      persist_cwd "$id" "$wt" "$branch"
+      row=$(session_row "$id")
+    fi
     start_window "$row"
     row=$(session_row "$id")
     flock -u 9
@@ -654,6 +764,39 @@ for key in sorted(d['sessions'],key=int):
 print(json.dumps(result))
 PY
     ;;
+  prompt)
+    id=$2; b64=$3; row=$(session_row "$id"); flock -u 9
+    row_field "$row" paneId; pane=$REPLY
+    [ -n "$pane" ] || { echo "sandbox session #$id has no herdr pane" >&2; exit 1; }
+    text=$(printf '%s' "$b64" | base64 -d)
+    herdr_cli pane send-text "$pane" "$text" >/dev/null
+    herdr_cli pane send-keys "$pane" enter >/dev/null
+    printf '%s\\n' '{"ok":true}'
+    ;;
+  read)
+    id=$2; lines=\${3:-80}; row=$(session_row "$id"); flock -u 9
+    row_field "$row" paneId; pane=$REPLY
+    [ -n "$pane" ] || { echo "sandbox session #$id has no herdr pane" >&2; exit 1; }
+    herdr_cli pane read "$pane" --source recent-unwrapped --lines "$lines"
+    ;;
+  collect)
+    id=$2; row=$(session_row "$id"); flock -u 9
+    row_field "$row" worktreePath; cwd=$REPLY
+    [ -n "$cwd" ] || cwd=$checkout
+    python3 - "$cwd" <<'PY'
+import json,subprocess,sys
+cwd=sys.argv[1]
+def git(*args):
+    return subprocess.run(['git','-C',cwd,*args],capture_output=True,text=True)
+print(json.dumps({
+  'cwd':cwd,
+  'branch':git('rev-parse','--abbrev-ref','HEAD').stdout.strip(),
+  'status':git('status','--porcelain').stdout,
+  'log':git('log','-8','--oneline').stdout,
+  'diff':git('diff','HEAD').stdout[:50000],
+}))
+PY
+    ;;
   report-herdr)
     id=$2; row=$(session_row "$id"); flock -u 9
     row_field "$row" sessionId; session_id=$REPLY
@@ -672,6 +815,6 @@ for request in requests:
  except OSError: pass
 PY
     ;;
-  *) echo 'usage: sessionctl <ensure [id]|new|focus id|attach id|detach|list|report-herdr id|reserve-transfer session-id|rollback-transfer id>' >&2; exit 2;;
+  *) echo 'usage: sessionctl <ensure [id]|new [branch]|focus id|attach id|detach|list|prompt id b64|read id [lines]|collect id|report-herdr id|reserve-transfer session-id|rollback-transfer id>' >&2; exit 2;;
 esac
 `;

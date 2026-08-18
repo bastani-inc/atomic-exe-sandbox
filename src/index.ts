@@ -11,13 +11,18 @@ import {
 	ensureSandbox,
 	exactSandbox,
 } from "./sandbox.js";
+import { inspectGitIdentity } from "./git.js";
+import { parsePromptArgs, resolvePromptTarget } from "./prompt.js";
 import { formatChecks, runDoctor } from "./doctor.js";
 import {
 	ensureRemoteSession,
 	formatSessions,
+	installSessionctl,
 	listRemoteSessions,
+	promptRemoteSession,
 	reserveTransferredSession,
 	rollbackTransferredSession,
+	SESSIONCTL,
 	uploadTransferredSession,
 } from "./sessions.js";
 import {
@@ -31,6 +36,7 @@ import {
 	STOPPED,
 } from "./ui.js";
 import { allowDirtyWorktree } from "./worktree.js";
+import { sandboxTool } from "./tool.js";
 
 const MANIFEST_PATH = join(homedir(), ".atomic-exe", "manifest.json");
 const EXE_GITHUB_HOST = "github.int.exe.xyz";
@@ -144,6 +150,32 @@ function parseId(value: string): number | undefined {
 	return /^\d+$/.test(value) ? Number(value) : undefined;
 }
 
+export { parsePromptArgs, resolvePromptTarget } from "./prompt.js";
+
+export function sameSandboxCheckout(
+	remote: Pick<RemoteIdentity, "owner" | "repo" | "branch">,
+	git: { owner: string; repo: string; branch: string },
+): boolean {
+	return (
+		git.owner.toLowerCase() === remote.owner.toLowerCase() &&
+		git.repo.toLowerCase() === remote.repo.toLowerCase() &&
+		git.branch === remote.branch
+	);
+}
+
+/** True when cwd is this VM's published checkout, not a child node's worktree. */
+export function checkoutIsThisSandbox(
+	remote: Pick<RemoteIdentity, "owner" | "repo" | "branch">,
+	cwd: string,
+): boolean {
+	try {
+		return sameSandboxCheckout(remote, inspectGitIdentity(cwd));
+	} catch {
+		return false;
+	}
+}
+
+
 async function localHandler(
 	args: string,
 	ctx: ExtensionCommandContext,
@@ -157,6 +189,23 @@ async function localHandler(
 		if (!command || id !== undefined) {
 			if (!(await allowDirtyWorktree(ctx))) return;
 			await connectCurrent(ctx.cwd, ctx, id);
+			return;
+		}
+		if (command === "prompt") {
+			const prompt = parsePromptArgs(args);
+			if (!prompt?.text) throw new Error("Usage: /sandbox prompt [id] <text>");
+			const found = exactSandbox(ctx.cwd);
+			let target = 0;
+			await showOperation(ctx, "Prompting sandbox…", () => {
+				installSessionctl(found.vm.vm_name);
+				target = resolvePromptTarget(
+					prompt.id,
+					listRemoteSessions(found.vm.vm_name),
+				);
+				ensureRemoteSession(found.vm.vm_name, target);
+				promptRemoteSession(found.vm.vm_name, target, prompt.text);
+			});
+			done(ctx, paint, `Sent prompt to sandbox #${target}`);
 			return;
 		}
 		if (command === "list") {
@@ -221,7 +270,7 @@ async function localHandler(
 			return;
 		}
 		ctx.ui.notify(
-			usage(paint, "[<id>|list|transfer|create|clean|destroy [--force]|doctor]"),
+			usage(paint, "[<id>|list|prompt [id] <text>|transfer|create|clean|destroy [--force]|doctor]"),
 			"info",
 		);
 	} catch (error) {
@@ -287,6 +336,25 @@ async function remoteHandler(
 		paint = paintFor(ctx),
 		ctl = join(homedir(), ".atomic-exe", "sessionctl");
 	try {
+		const prompt = parsePromptArgs(args);
+		if (prompt) {
+			if (!prompt.text) throw new Error("Usage: /sandbox prompt [id] <text>");
+			writeFileSync(ctl, SESSIONCTL, { mode: 0o700 });
+			const listed = await atomic.exec(ctl, ["list"]);
+			if (listed.code !== 0) throw new Error(listed.stderr || listed.stdout);
+			const sessions = JSON.parse(listed.stdout) as Array<{ id: number }>;
+			const target = resolvePromptTarget(prompt.id, sessions);
+			const ensured = await atomic.exec(ctl, ["ensure", String(target)]);
+			if (ensured.code !== 0) throw new Error(ensured.stderr || ensured.stdout);
+			const sent = await atomic.exec(ctl, [
+				"prompt",
+				String(target),
+				Buffer.from(prompt.text).toString("base64"),
+			]);
+			if (sent.code !== 0) throw new Error(sent.stderr || sent.stdout);
+			done(ctx, paint, `Sent prompt to sandbox #${target}`);
+			return;
+		}
 		if (id !== undefined) {
 			const ensured = await atomic.exec(ctl, ["ensure", String(id)]);
 			if (ensured.code !== 0) throw new Error(ensured.stderr || ensured.stdout);
@@ -357,7 +425,7 @@ async function remoteHandler(
 			if (result.code !== 0) throw new Error(result.stderr || result.stdout);
 			return;
 		}
-		ctx.ui.notify(usage(paint, "[<id>|new|switch|list|status|detach]"), "info");
+		ctx.ui.notify(usage(paint, "[<id>|new|switch|list|status|detach|prompt [id] <text>]"), "info");
 	} catch (error) {
 		ctx.ui.notify((error as Error).message, "error");
 	} finally {
@@ -404,11 +472,28 @@ export default function (atomic: ExtensionAPI) {
 		atomic.on("session_shutdown", (_event, ctx) =>
 			ctx.ui.setStatus("atomic-exe-sandbox", undefined),
 		);
+		atomic.registerTool(sandboxTool);
 		atomic.registerCommand("sandbox", {
-			description: "Manage Atomic sessions in this exe.dev sandbox",
-			handler: (args, ctx) => remoteHandler(atomic, args, ctx, remote),
+			description:
+				"Enter this node's child sandbox, or manage sessions if this is the VM checkout",
+			handler: (args, ctx) =>
+				checkoutIsThisSandbox(remote, ctx.cwd)
+					? remoteHandler(atomic, args, ctx, remote)
+					: localHandler(args, ctx),
 			getArgumentCompletions: (prefix) =>
-				["new", "switch", "list", "status", "detach"]
+				[
+					"new",
+					"switch",
+					"list",
+					"status",
+					"detach",
+					"prompt",
+					"create",
+					"clean",
+					"destroy",
+					"destroy --force",
+					"doctor",
+				]
 					.filter((value) => value.startsWith(prefix))
 					.map((value) => ({ value, label: value })),
 		});
@@ -438,11 +523,12 @@ export default function (atomic: ExtensionAPI) {
 			);
 		}
 	});
+	atomic.registerTool(sandboxTool);
 	atomic.registerCommand("sandbox", {
 		description: "Create or enter this branch's exe.dev sandbox",
 		handler: localHandler,
 		getArgumentCompletions: (prefix) =>
-			["list", "transfer", "create", "clean", "destroy", "destroy --force", "doctor"]
+			["list", "prompt", "transfer", "create", "clean", "destroy", "destroy --force", "doctor"]
 				.filter((value) => value.startsWith(prefix))
 				.map((value) => ({ value, label: value })),
 	});
