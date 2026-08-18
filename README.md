@@ -56,15 +56,24 @@ Authentication is injected at exe.dev's network edge and follows the integration
 
 `transfer` requires the local Atomic to be idle. It creates the VM if absent, reserves the next session number, streams the current JSONL, changes only the header `cwd`, starts that session remotely, leaves a visible custom marker in the local JSONL that is excluded from model context, connects, and closes the originating local Atomic after detach. The local JSONL remains as a backup.
 
-The local session also registers a `sandbox` tool so a host model or workflow can allocate **nodes**. A node is one remote Atomic session with its own git worktree/branch, so each workflow has its own tool queue:
+The local session also registers a `sandbox` tool for the non-TUI sandbox lifecycle and remote Atomic sessions. A node is one remote Atomic session with its own git worktree/branch, so each workflow has its own tool queue:
 
 ```text
-sandbox { action: spawn, label: "auth" }     # new session on atomic-node/auth
+sandbox { action: create }                  # provision this checkout's sandbox
+sandbox { action: ensure }                  # find or provision the sandbox
+sandbox { action: spawn, label: "auth" }   # node on atomic-node/auth
+sandbox { action: new }                     # session on the published checkout
+sandbox { action: list }                    # list sessions
+sandbox { action: status, id: 2 }           # inspect one session
 sandbox { action: prompt, id: 2, text: "…" } # send a workflow or task
-sandbox { action: collect, id: 2 }           # git status / log / diff
+sandbox { action: read, id: 2 }             # read recent output
+sandbox { action: collect, id: 2 }          # git status / log / diff
+sandbox { action: clean }                   # clear regenerable caches
+sandbox { action: destroy }                 # delete after safety checks
+sandbox { action: doctor }                  # check prerequisites
 ```
 
-Combine those branches later with `gh stack`. The tool does not take over this TUI.
+Combine node branches later with `gh stack`. The tool does not take over this TUI.
 
 ## Remote Atomic commands
 

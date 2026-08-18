@@ -299,6 +299,11 @@ describe("only allowlisted config leaves the machine",()=>{
  test("what actually went is reported afterwards",()=>expect(SANDBOX_SOURCE).toContain("formatTransferPlan(sent)"));
 })
 
+describe("sandbox transfer approval options",()=>{
+ test("creation and ensure accept approveTransfer",()=>{expect(SANDBOX_SOURCE.match(/options:\{startDefault\?:boolean;approveTransfer\?:boolean\}/g)?.length).toBe(2);expect(SANDBOX_SOURCE).toContain("createSandbox(cwd,ctx,options)")});
+ test("approved creation skips the UI confirmation while slash create keeps it",()=>{expect(SANDBOX_SOURCE).toContain("if(ctx.hasUI&&!options.approveTransfer)");expect(SANDBOX_SOURCE).toContain("ctx.ui.confirm(");expect(INDEX_SOURCE).toContain("const sandbox = await createSandbox(ctx.cwd, ctx);")});
+})
+
 import { EXE_HOST_KEY_FINGERPRINT, formatChecks, knownHostFingerprints, sshFingerprint, type Check } from "../src/doctor.js";
 describe("doctor preflight",()=>{
  // Every VM connection is validated against exe.dev's key through HostKeyAlias, so a

@@ -44,7 +44,7 @@ export function listText(paint:Paint=PLAIN_PAINT):string{
   return `${tint(s.vm.vm_name.padEnd(55))} ${tint(s.health.padEnd(11))} ${paint.dim(m?`${m.owner}/${m.repo}:${m.branch}`:(s.detail??""))}`;
  }).join("\n");
 }
-export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean}={}):Promise<DiscoveredSandbox>{
+export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean;approveTransfer?:boolean}={}):Promise<DiscoveredSandbox>{
  const git=inspectPublishedGit(cwd),identity=identityForGit(git),account=accountFingerprint();
  // Existing sandboxes are found by identity tag, not by name, so a half-built VM from a
  // previous attempt is still recognised even though its name is unique to that attempt.
@@ -61,7 +61,7 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
  const packages=validatePortableConfig();
  // Show exactly what will leave the machine, rather than describing it in prose.
  const plan=portableTransferPlan();
- if(ctx.hasUI){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`These paths will be streamed to ${vmName} over SSH:\n\n${formatTransferPlan(plan)}\n\nLocal packages: ${packages.map(p=>basename(p.source)).join(", ")||"none"}. Nothing else in the Atomic agent directory is sent — sessions, caches, run history, and binaries stay on this machine.`);if(!ok)throw new Error("sandbox creation cancelled")}
+ if(ctx.hasUI&&!options.approveTransfer){const ok=await ctx.ui.confirm("Transfer your Atomic environment?",`These paths will be streamed to ${vmName} over SSH:\n\n${formatTransferPlan(plan)}\n\nLocal packages: ${packages.map(p=>basename(p.source)).join(", ")||"none"}. Nothing else in the Atomic agent directory is sent — sessions, caches, run history, and binaries stay on this machine.`);if(!ok)throw new Error("sandbox creation cancelled")}
  const manifest=initialManifest(git,identity,{vmName,generation,account});
  try{
   await showProgress(ctx,reuse?"Resuming existing VM…":"Checking GitHub integration…");
@@ -82,7 +82,7 @@ export async function createSandbox(cwd:string,ctx:ExtensionContext,options:{sta
 export function sandboxSessions(cwd:string){const found=exactSandbox(cwd);return listRemoteSessions(found.vm.vm_name)}
 export function cleanCurrent(cwd:string):DiscoveredSandbox{const found=exactSandbox(cwd);if(found.health!=="ready"||!found.manifest)throw new Error(`sandbox is ${found.health}`);cleanSandbox(found.vm.vm_name,found.manifest);return found}
 export function destroyCurrent(cwd:string,force:boolean):string{const found=exactSandbox(cwd);if(!found.manifest)throw new Error("validated manifest required");guardDestroy(found.vm.vm_name,found.manifest,force);deleteVm(found.vm.vm_name);return found.vm.vm_name}
-export async function ensureSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean}={}):Promise<DiscoveredSandbox>{
+export async function ensureSandbox(cwd:string,ctx:ExtensionContext,options:{startDefault?:boolean;approveTransfer?:boolean}={}):Promise<DiscoveredSandbox>{
  try{return exactSandbox(cwd)}catch(error){if(!(error as Error).message.startsWith("no sandbox exists"))throw error;return createSandbox(cwd,ctx,options)}
 }
 export async function connectCurrent(cwd:string,ctx:ExtensionContext,id?:number):Promise<void>{const found=await ensureSandbox(cwd,ctx);await connect(found,ctx,id)}

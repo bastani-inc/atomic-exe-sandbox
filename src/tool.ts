@@ -1,7 +1,15 @@
 import { defineTool, StringEnum } from "@bastani/atomic";
+import type { ExtensionContext } from "@bastani/atomic";
 import { Type } from "typebox";
+import { formatChecks, runDoctor } from "./doctor.js";
 import { resolvePromptTarget } from "./prompt.js";
-import { exactSandbox } from "./sandbox.js";
+import {
+	cleanCurrent,
+	createSandbox,
+	destroyCurrent,
+	ensureSandbox,
+	exactSandbox,
+} from "./sandbox.js";
 import {
 	collectRemoteSession,
 	createRemoteSession,
@@ -32,16 +40,39 @@ function jsonResult(value: unknown) {
 	};
 }
 
+export async function readySandbox(ctx: ExtensionContext) {
+	const found = await ensureSandbox(ctx.cwd, ctx, { approveTransfer: true });
+	const vm = found.vm.vm_name;
+	installSessionctl(vm);
+	return { found, vm };
+}
+
 export const sandboxTool = defineTool({
 	name: "sandbox",
 	label: "Sandbox",
 	description:
-		"Allocate a remote Atomic session (a node) on this checkout's exe.dev sandbox so a workflow can run tools without sharing this session's queue. Inside a node that is already on its own branch, this talks to that branch's child sandbox. Use spawn, then prompt, then collect. Do not use this to attach a TUI.",
+		"Manage this checkout's non-TUI exe.dev sandbox lifecycle and remote Atomic sessions. Use spawn, then prompt, then collect for node work. Do not use this to attach a TUI.",
 	parameters: Type.Object({
-		action: StringEnum(["spawn", "list", "status", "prompt", "read", "collect"], {
-			description:
-				"spawn: start a new Atomic session on a worktree. list: all nodes. status: one node. prompt: send text into that session (a workflow command or task). read: recent pane output. collect: git status/diff/log from that node's worktree.",
-		}),
+		action: StringEnum(
+			[
+				"create",
+				"ensure",
+				"spawn",
+				"new",
+				"list",
+				"status",
+				"prompt",
+				"read",
+				"collect",
+				"clean",
+				"destroy",
+				"doctor",
+			],
+			{
+				description:
+					"create/ensure: provision or find this checkout's sandbox. spawn: start a node on a worktree. new: start a session on the published checkout. list/status: inspect sessions. prompt/read/collect: work with a session. clean/destroy: maintain the existing sandbox. doctor: check prerequisites.",
+			},
+		),
 		id: Type.Optional(
 			Type.Integer({
 				minimum: 1,
@@ -72,14 +103,33 @@ export const sandboxTool = defineTool({
 				description: "How many recent pane lines to return for action=read. Default 80.",
 			}),
 		),
+		force: Type.Optional(
+			Type.Boolean({
+				description: "For action=destroy, skip remote work and attach safety checks.",
+			}),
+		),
 	}),
 
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-		const found = exactSandbox(ctx.cwd);
-		const vm = found.vm.vm_name;
-		installSessionctl(vm);
 		switch (params.action) {
+			case "create": {
+				const found = await createSandbox(ctx.cwd, ctx, { approveTransfer: true });
+				return jsonResult({
+					vm: found.vm.vm_name,
+					health: found.health,
+					hint: "Sandbox is ready for Atomic sessions.",
+				});
+			}
+			case "ensure": {
+				const found = await ensureSandbox(ctx.cwd, ctx, { approveTransfer: true });
+				return jsonResult({
+					vm: found.vm.vm_name,
+					health: found.health,
+					hint: "Sandbox is ready for Atomic sessions.",
+				});
+			}
 			case "spawn": {
+				const { vm } = await readySandbox(ctx);
 				const branch = params.branch?.trim() || nodeBranch(params.label);
 				const session = createRemoteSession(vm, branch);
 				return jsonResult({
@@ -89,7 +139,20 @@ export const sandboxTool = defineTool({
 					hint: `Node #${session.id} is a separate Atomic session. Send work with action=prompt. Combine later with action=collect and gh stack.`,
 				});
 			}
-			case "list":
+			case "new": {
+				const { vm } = await readySandbox(ctx);
+				const session = createRemoteSession(vm);
+				return jsonResult({
+					id: session.id,
+					branch: session.branch,
+					worktreePath: session.worktreePath,
+					hint: `Session #${session.id} is on the published checkout. Send work with action=prompt.`,
+				});
+			}
+			case "list": {
+				const found = exactSandbox(ctx.cwd);
+				const vm = found.vm.vm_name;
+				installSessionctl(vm);
 				return jsonResult(
 					listRemoteSessions(vm).map((session) => ({
 						id: session.id,
@@ -100,8 +163,12 @@ export const sandboxTool = defineTool({
 						transferred: session.transferred,
 					})),
 				);
+			}
 			case "status": {
 				if (!params.id) throw new Error("status requires id");
+				const found = exactSandbox(ctx.cwd);
+				const vm = found.vm.vm_name;
+				installSessionctl(vm);
 				const session = ensureRemoteSession(vm, params.id);
 				return jsonResult({
 					id: session.id,
@@ -111,6 +178,7 @@ export const sandboxTool = defineTool({
 			}
 			case "prompt": {
 				if (!params.text?.trim()) throw new Error("prompt requires text");
+				const { vm } = await readySandbox(ctx);
 				const target = resolvePromptTarget(params.id, listRemoteSessions(vm));
 				ensureRemoteSession(vm, target);
 				promptRemoteSession(vm, target, params.text);
@@ -118,6 +186,7 @@ export const sandboxTool = defineTool({
 			}
 			case "read": {
 				if (!params.id) throw new Error("read requires id");
+				const { vm } = await readySandbox(ctx);
 				ensureRemoteSession(vm, params.id);
 				return jsonResult({
 					id: params.id,
@@ -126,8 +195,19 @@ export const sandboxTool = defineTool({
 			}
 			case "collect": {
 				if (!params.id) throw new Error("collect requires id");
+				const { vm } = await readySandbox(ctx);
 				ensureRemoteSession(vm, params.id);
 				return jsonResult({ id: params.id, ...collectRemoteSession(vm, params.id) });
+			}
+			case "clean": {
+				const found = cleanCurrent(ctx.cwd);
+				return jsonResult(found.vm.vm_name);
+			}
+			case "destroy":
+				return jsonResult(destroyCurrent(ctx.cwd, params.force === true));
+			case "doctor": {
+				const checks = runDoctor(ctx.cwd);
+				return jsonResult({ checks, report: formatChecks(checks) });
 			}
 			default:
 				throw new Error(`unknown sandbox action: ${String(params.action)}`);
